@@ -231,6 +231,7 @@ mod tests {
     fn doc(folder: &str, files: &[(&str, &str)]) -> Doc {
         Doc::new(&Entity {
             id: EntityId::parse(folder).unwrap(),
+            collection: String::new(),
             components: files
                 .iter()
                 .map(|(path, text)| ComponentFile {

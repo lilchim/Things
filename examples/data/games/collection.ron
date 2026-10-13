@@ -1,0 +1,8 @@
+Collection(
+    name: "Games",
+    starts_with: [
+        "status.ron",
+        "moods.ron",
+    ],
+    radar: true,
+)

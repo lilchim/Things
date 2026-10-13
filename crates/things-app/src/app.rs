@@ -4,14 +4,21 @@ use eframe::egui;
 use things_core::components::{OwnState, PlayState, Release, Stage, Status, to_ron};
 use things_core::radar::{Radar, Watch};
 use things_core::search::{Doc, Query, Suggestion, Vocabulary};
-use things_core::{EntityId, Store};
+use things_core::{Collection, EntityId, Manifest, Store};
 
 use crate::components::{self, Editor, Kind, Raw};
 
 pub struct ThingsApp {
     store: Store,
     kinds: Vec<Box<dyn Kind>>,
+    collections: Vec<Collection>,
+    /// The collection the library shows, by folder; `None` shows all.
+    scope: Option<String>,
+    new_collection: String,
+    /// Every entity in every collection.
     ids: Vec<EntityId>,
+    /// Which collection (folder) each entity lives in.
+    homes: HashMap<EntityId, String>,
     /// What search sees of each entity, kept in step with every write.
     docs: HashMap<EntityId, Doc>,
     /// Ownership and release of each entity that has them, for the radar.
@@ -22,9 +29,11 @@ pub struct ThingsApp {
     /// The last radar triage, so a misclick can be taken back.
     undo: Option<Undo>,
     search: String,
-    /// The last search and what it found, so typing doesn't rescan per frame.
-    hits: Option<(String, Vec<EntityId>)>,
-    /// Keys and values for completion, rebuilt when the index changes.
+    /// The last search, its scope and what it found, so typing doesn't
+    /// rescan per frame.
+    hits: Option<(String, Option<String>, Vec<EntityId>)>,
+    /// Keys and values in scope for completion, rebuilt when the index or
+    /// the scope changes.
     vocab: Option<Vocabulary>,
     completion: Completion,
     new_name: String,
@@ -102,6 +111,11 @@ impl OpenComponent {
 enum Action {
     Select(EntityId),
     Create,
+    /// Show one collection (by folder), or all with `None`.
+    Scope(Option<String>),
+    NewCollection,
+    /// Move the open entity into another collection.
+    Move(String),
     Reload,
     Add(String, String),
     Save(usize),
@@ -120,7 +134,11 @@ impl ThingsApp {
         let mut app = Self {
             store,
             kinds: components::registry(),
+            collections: Vec::new(),
+            scope: None,
+            new_collection: String::new(),
             ids: Vec::new(),
+            homes: HashMap::new(),
             docs: HashMap::new(),
             watches: HashMap::new(),
             radar: None,
@@ -135,20 +153,68 @@ impl ThingsApp {
             error: None,
         };
         app.refresh_list();
+        app.scope = app.collections.first().map(|c| c.folder.clone());
         app
     }
 
-    /// Re-reads the entity list and every entity for the search index.
+    /// Re-reads the collections, the entity list and every entity for the
+    /// search index.
     fn refresh_list(&mut self) {
-        match self.store.list() {
-            Ok(ids) => self.ids = ids,
-            Err(e) => self.error = Some(e.to_string()),
-        }
+        self.refresh_ids();
         self.docs.clear();
         self.watches.clear();
         for id in self.ids.clone() {
             self.reindex(&id);
         }
+    }
+
+    /// Re-reads the collections and which entities live where.
+    fn refresh_ids(&mut self) {
+        match self.store.collections() {
+            Ok(collections) => self.collections = collections,
+            Err(e) => self.error = Some(e.to_string()),
+        }
+        match self.store.list() {
+            Ok(list) => {
+                self.ids = list.iter().map(|(id, _)| id.clone()).collect();
+                self.homes = list.into_iter().collect();
+            }
+            Err(e) => self.error = Some(e.to_string()),
+        }
+        if let Some(scope) = &self.scope
+            && !self.collections.iter().any(|c| c.folder == *scope)
+        {
+            self.scope = None;
+        }
+        self.hits = None;
+        self.vocab = None;
+        self.radar = None;
+    }
+
+    fn collection(&self, folder: &str) -> Option<&Collection> {
+        self.collections.iter().find(|c| c.folder == folder)
+    }
+
+    /// The collection new things go into: the one on screen, else the first.
+    fn target(&self) -> Option<&Collection> {
+        self.scope
+            .as_deref()
+            .and_then(|f| self.collection(f))
+            .or(self.collections.first())
+    }
+
+    fn in_scope(&self, id: &EntityId) -> bool {
+        self.scope
+            .as_ref()
+            .is_none_or(|s| self.homes.get(id) == Some(s))
+    }
+
+    /// Whether an entity lives in a collection that feeds the radar.
+    fn on_radar(&self, id: &EntityId) -> bool {
+        self.homes
+            .get(id)
+            .and_then(|f| self.collection(f))
+            .is_some_and(|c| c.manifest.radar)
     }
 
     fn reindex(&mut self, id: &EntityId) {
@@ -175,26 +241,37 @@ impl ThingsApp {
 
     /// Entities matching the search line, in library order.
     fn hits(&mut self) -> &[EntityId] {
-        if self.hits.as_ref().is_none_or(|(q, _)| *q != self.search) {
+        let stale = self
+            .hits
+            .as_ref()
+            .is_none_or(|(q, scope, _)| *q != self.search || *scope != self.scope);
+        if stale {
             let query = Query::parse(&self.search);
             let hits = self
                 .ids
                 .iter()
+                .filter(|id| self.in_scope(id))
                 .filter(|id| {
                     query.is_empty() || self.docs.get(id).is_some_and(|d| query.matches(d))
                 })
                 .cloned()
                 .collect();
-            self.hits = Some((self.search.clone(), hits));
+            self.hits = Some((self.search.clone(), self.scope.clone(), hits));
         }
-        &self.hits.as_ref().expect("just filled").1
+        &self.hits.as_ref().expect("just filled").2
     }
 
     /// Recomputes suggestions when the search line changed.
     fn refresh_completion(&mut self) {
-        let vocab = self
-            .vocab
-            .get_or_insert_with(|| Vocabulary::new(self.docs.values()));
+        if self.vocab.is_none() {
+            let docs = self
+                .docs
+                .iter()
+                .filter(|(id, _)| self.in_scope(id))
+                .map(|(_, doc)| doc);
+            self.vocab = Some(Vocabulary::new(docs));
+        }
+        let vocab = self.vocab.as_ref().expect("just filled");
         if self.completion.line == self.search {
             return;
         }
@@ -365,18 +442,51 @@ impl ThingsApp {
             }
             Action::Create => {
                 let name = self.new_name.trim().to_owned();
+                let Some(target) = self.target().cloned() else {
+                    return;
+                };
                 if name.is_empty() {
                     return;
                 }
                 self.save_all();
-                match self.store.create(&name) {
+                match self.store.create(&target.folder, &name) {
                     Ok(id) => {
                         self.new_name.clear();
-                        if let Err(e) = self.store.list().map(|ids| self.ids = ids) {
-                            self.error = Some(e.to_string());
-                        }
+                        self.start_components(&id, &target.manifest);
+                        self.refresh_ids();
                         self.reindex(&id);
                         self.open_entity(id);
+                    }
+                    Err(e) => self.error = Some(e.to_string()),
+                }
+            }
+            Action::Scope(scope) => {
+                self.scope = scope;
+                self.vocab = None;
+            }
+            Action::NewCollection => {
+                let name = self.new_collection.trim().to_owned();
+                if name.is_empty() {
+                    return;
+                }
+                match self.store.create_collection(&Manifest::named(&name)) {
+                    Ok(c) => {
+                        self.new_collection.clear();
+                        self.refresh_ids();
+                        self.scope = Some(c.folder);
+                    }
+                    Err(e) => self.error = Some(e.to_string()),
+                }
+            }
+            Action::Move(folder) => {
+                let Some(id) = self.open.as_ref().map(|o| o.id.clone()) else {
+                    return;
+                };
+                self.save_all();
+                match self.store.move_to(&id, &folder) {
+                    Ok(()) => {
+                        self.refresh_ids();
+                        self.reindex(&id);
                     }
                     Err(e) => self.error = Some(e.to_string()),
                 }
@@ -424,6 +534,17 @@ impl ThingsApp {
         }
     }
 
+    /// Gives a new entity the components its collection starts things
+    /// with, made the way "Add component" makes them. A file no kind
+    /// knows starts out empty.
+    fn start_components(&mut self, id: &EntityId, manifest: &Manifest) {
+        for (path, text) in components::starting_files(&self.kinds, &manifest.starts_with) {
+            if let Err(e) = self.store.write(id, &path, &text) {
+                self.error = Some(e.to_string());
+            }
+        }
+    }
+
     /// Creates an entity marked Interested from the quick-capture form, with
     /// a release if a date was given, and stays on the radar for the next.
     fn spot(&mut self) {
@@ -438,7 +559,15 @@ impl ThingsApp {
         if !release.date_is_valid() {
             return self.error = Some("Release date must be YYYY-MM-DD, YYYY-MM or YYYY.".into());
         }
-        let id = match self.store.create(&name) {
+        let Some(folder) = self
+            .collections
+            .iter()
+            .find(|c| c.manifest.radar)
+            .map(|c| c.folder.clone())
+        else {
+            return self.error = Some("No collection feeds the radar.".into());
+        };
+        let id = match self.store.create(&folder, &name) {
             Ok(id) => id,
             Err(e) => return self.error = Some(e.to_string()),
         };
@@ -453,10 +582,7 @@ impl ThingsApp {
                 self.error = Some(e.to_string());
             }
         }
-        match self.store.list() {
-            Ok(ids) => self.ids = ids,
-            Err(e) => self.error = Some(e.to_string()),
-        }
+        self.refresh_ids();
         self.reindex(&id);
         self.spot = Spot::default();
     }
@@ -541,17 +667,23 @@ impl ThingsApp {
                 }
             });
         });
+        self.collections_ui(ui, actions);
         self.search_ui(ui);
         if !self.search.trim().is_empty() {
             let shown = self.hits().len();
-            ui.weak(format!("{shown} of {}", self.ids.len()));
+            let total = self.ids.iter().filter(|id| self.in_scope(id)).count();
+            ui.weak(format!("{shown} of {total}"));
         }
         ui.separator();
 
+        let hint = match (&self.scope, self.target()) {
+            (Some(_), _) | (None, None) => "New thing".to_owned(),
+            (None, Some(c)) => format!("New thing in {}", c.name()),
+        };
         ui.horizontal(|ui| {
             let field = ui.add(
                 egui::TextEdit::singleline(&mut self.new_name)
-                    .hint_text("New thing")
+                    .hint_text(hint)
                     .desired_width(ui.available_width() - 50.0),
             );
             let enter = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
@@ -562,22 +694,73 @@ impl ThingsApp {
         ui.separator();
 
         self.hits();
-        let hits = &self.hits.as_ref().expect("just filled").1;
+        let hits = &self.hits.as_ref().expect("just filled").2;
         let selected = self.open.as_ref().map(|o| &o.id);
+        let all = self.scope.is_none();
         egui::ScrollArea::vertical().show(ui, |ui| {
             for id in hits {
-                let title = id.title();
                 let response = ui
-                    .selectable_label(selected == Some(id), title)
+                    .horizontal(|ui| {
+                        let r = ui.selectable_label(selected == Some(id), id.title());
+                        // Searching everything says where each thing lives.
+                        if all && let Some(c) = self.homes.get(id).and_then(|f| self.collection(f))
+                        {
+                            ui.weak(c.name());
+                        }
+                        r
+                    })
+                    .inner
                     .on_hover_text(id.to_string());
                 if response.clicked() && selected != Some(id) {
                     actions.push(Action::Select(id.clone()));
                 }
             }
-            if self.ids.is_empty() {
+            if !self.ids.iter().any(|id| self.in_scope(id)) {
                 ui.weak("Nothing here yet. Add a thing above.");
             }
         });
+    }
+
+    /// Picks the collection the library shows, or all of them, and makes
+    /// new collections.
+    fn collections_ui(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
+        let count = |folder: &str| self.homes.values().filter(|f| *f == folder).count();
+        let shown = match self.scope.as_deref().and_then(|f| self.collection(f)) {
+            Some(c) => c.name(),
+            None => "Everything".to_owned(),
+        };
+        egui::ComboBox::from_id_salt("collection")
+            .selected_text(shown)
+            .width(ui.available_width())
+            .show_ui(ui, |ui| {
+                for c in &self.collections {
+                    let label = format!("{}  ({})", c.name(), count(&c.folder));
+                    let on = self.scope.as_deref() == Some(c.folder.as_str());
+                    if ui.selectable_label(on, label).clicked() && !on {
+                        actions.push(Action::Scope(Some(c.folder.clone())));
+                    }
+                }
+                let label = format!("Everything  ({})", self.ids.len());
+                if ui.selectable_label(self.scope.is_none(), label).clicked()
+                    && self.scope.is_some()
+                {
+                    actions.push(Action::Scope(None));
+                }
+                ui.separator();
+                ui.horizontal(|ui| {
+                    let field = ui.add(
+                        egui::TextEdit::singleline(&mut self.new_collection)
+                            .hint_text("New collection")
+                            .desired_width(140.0),
+                    );
+                    let enter = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    let ready = !self.new_collection.trim().is_empty();
+                    if ui.add_enabled(ready, egui::Button::new("Add")).clicked() || (enter && ready)
+                    {
+                        actions.push(Action::NewCollection);
+                    }
+                });
+            });
     }
 
     fn entity_ui(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
@@ -585,9 +768,22 @@ impl ThingsApp {
             return self.radar_ui(ui, actions);
         };
 
+        let home = self.homes.get(&open.id).cloned().unwrap_or_default();
         ui.horizontal(|ui| {
             ui.heading(open.id.title());
             ui.weak(open.id.to_string());
+            let here = self.collections.iter().find(|c| c.folder == home);
+            let label = here.map_or_else(|| "Move to".to_owned(), |c| format!("in {}", c.name()));
+            ui.menu_button(label, |ui| {
+                ui.weak("Move to");
+                for c in self.collections.iter().filter(|c| c.folder != home) {
+                    if ui.button(c.name()).clicked() {
+                        actions.push(Action::Move(c.folder.clone()));
+                    }
+                }
+            })
+            .response
+            .on_hover_text("The collection this thing lives in. Click to move it.");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let existing: Vec<&str> = open.components.iter().map(|c| c.path.as_str()).collect();
                 ui.menu_button("Add component", |ui| {
@@ -657,7 +853,8 @@ impl ThingsApp {
     fn radar_ui(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
         let today = chrono::Local::now().format("%Y-%m-%d").to_string();
         if self.radar.as_ref().is_none_or(|(day, _)| *day != today) {
-            self.radar = Some((today.clone(), Radar::new(self.watches.values(), &today)));
+            let watches = self.watches.values().filter(|w| self.on_radar(&w.id));
+            self.radar = Some((today.clone(), Radar::new(watches, &today)));
         }
         let radar = &self.radar.as_ref().expect("just filled").1;
 

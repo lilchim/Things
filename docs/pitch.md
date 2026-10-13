@@ -29,7 +29,7 @@ A game entity on disk might look like this:
 
 ```
 things/
-  entities/
+  games/
     mass-effect-7f3a/
       steam.ron            app id, playtime, last played
       status.ron           backlog | playing | finished | shelved
@@ -66,7 +66,7 @@ Around those, the app needs a library view to browse and filter entities, an ent
 ## Principles and non-goals
 
 - **Files are the source of truth.** The app reads and writes plain files; any index or cache can be rebuilt from them.
-- **Entities stay loose.** No fixed types. What something is comes from the components it has.
+- **Entities stay loose.** No schema. What something is comes from the components it has. Collections (games, tasks) keep different kinds apart and give new things their starting components, but never restrict what a thing can have.
 - **One user, local first.** No accounts, no server, no sharing.
 - **Grow by adding components.** A new feature is a new component with a data format and a view, not a change to the core.
 - **Not now:** recommendations, sale tracking, LLM summaries and other discovery features. Those can come later.
@@ -86,6 +86,7 @@ sgnome tackled the same core problem, finding a game to play in my own library, 
 | Choosing by mood | Several tag sets built on one tagging component: mood, gameplay, more later |
 | Links between entities | Two kinds: stored links on disk (a game belongs to a series) and in-memory indexes built from shared properties (every game tagged "chill") |
 | UI toolkit | egui, an immediate-mode toolkit: the UI is redrawn from the data every frame, with no two-way data binding |
+| Collections | Each thing lives in one collection folder (`games/`, `tasks/`) with a `collection.ron` naming its starting components and whether it feeds the radar. IDs stay unique across collections so links survive a move. Groupings that cut across collections stay with tags and search |
 
 ## Still open
 

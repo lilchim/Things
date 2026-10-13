@@ -19,6 +19,36 @@ window saves too.
 On Linux, eframe needs the usual windowing libraries at runtime
 (`libxkbcommon-x11`, `libGL`/`libEGL`, and Wayland or X11).
 
+## Collections
+
+Things live in collections so different kinds don't mix: games in one,
+tasks in another. The box at the top of the library picks the collection
+to show, or **Everything**. Search, suggestions and "New thing" all work
+inside the collection on screen.
+
+![The collection switcher on the sample data](docs/screenshots/collections.png)
+
+A collection is a folder with a `collection.ron`:
+
+```
+Collection(
+    name: "Tasks",
+    starts_with: ["notes.md"],   components a new thing gets
+    radar: false,                whether its things show on the radar
+)
+```
+
+Add one from the bottom of the switcher, or by hand. A thing's page says
+which collection it's in; click that to move it to another. IDs are unique
+across collections, so moving a thing never breaks a link to it.
+
+In **Everything**, `collection:tasks` and `-collection:games` narrow the
+list, and each row says where the thing lives.
+
+A data folder from before collections has its `entities/` folder renamed
+to `games/` on first launch, with a `collection.ron` written for it. A new
+data folder starts with an empty Games collection.
+
 ## Search
 
 The box above the library takes one line of tokens:
@@ -53,7 +83,7 @@ them.
 ## Radar
 
 With no thing open (or after pressing **Radar** above the library), the app
-shows what you want to get to:
+shows what you want to get to, from collections with `radar: true` (Games):
 
 - **Coming out**: everything with a Release that isn't out yet, soonest
   first. Early access counts as not out; if its date passes the radar asks
@@ -61,7 +91,8 @@ shows what you want to get to:
 - **Interested, out now**: things marked Interested that you could play
   today, lowest score first, and oldest first within a score.
 - **Spotted something?** takes a name, where you saw it, a link and an
-  optional release date, and adds the thing as Interested in one go.
+  optional release date, and adds the thing as Interested in one go, to
+  the first collection on the radar.
 
 Each row works a bit like an Anki card. **Later** adds a point to its
 score (stored in `ownership.ron`), so it drops below everything you haven't
@@ -78,8 +109,8 @@ release are their own components.
 
 ## Layout
 
-- `crates/things-core`: entity IDs, the file store, and the data formats of
-  the components. No UI.
+- `crates/things-core`: entity IDs, collections, the file store, and the
+  data formats of the components. No UI.
 - `crates/things-app`: the egui app. `src/components/` has one module per
   component kind, each with its view and form.
 
@@ -87,7 +118,8 @@ release are their own components.
 
 ```
 things/
-  entities/
+  games/                     a collection
+    collection.ron           Collection(name: "Games", starts_with: [...], radar: true)
     mass-effect-7f3a/        readable slug + short ID
       status.ron             Status(state: Playing)
       ownership.ron          Interested or Owned, when added, seen via, link
@@ -97,7 +129,13 @@ things/
       notes.md
       journal/
         2026-10-13-1930.md   one file per entry
+  tasks/
+    collection.ron
+    mow-the-lawn-1a2b/
+      notes.md
 ```
+
+Top-level folders without a `collection.ron` (such as `.git`) are ignored.
 
 Files are the source of truth. Any file the app doesn't recognise still
 shows up on the entity page as plain text, so nothing is hidden.
