@@ -1,6 +1,7 @@
 Collection(
     name: "Tasks",
     starts_with: [
+        "tasks.ron",
         "notes.md",
     ],
     radar: false,
