@@ -5,6 +5,9 @@
 //!   for later, or still in early access), soonest first.
 //! - **Out now**: things I'm interested in but don't own that I could play
 //!   today, oldest first so forgotten ones come back up.
+//! - **Snoozed**: put off for later, Anki style, until the day they return.
+//!
+//! Anything marked not interested is off the radar entirely.
 
 use crate::components::{OwnState, Ownership, Release, Stage, from_ron};
 use crate::{Entity, EntityId};
@@ -37,6 +40,14 @@ impl Watch {
         })
     }
 
+    fn ownership_is(&self, state: OwnState) -> bool {
+        self.ownership.as_ref().is_some_and(|o| o.state == state)
+    }
+
+    fn hidden(&self, today: &str) -> bool {
+        self.ownership.as_ref().is_some_and(|o| o.is_hidden(today))
+    }
+
     pub fn interested(&self) -> bool {
         self.ownership
             .as_ref()
@@ -56,6 +67,7 @@ impl Watch {
 pub struct Radar {
     pub coming: Vec<Watch>,
     pub out_now: Vec<Watch>,
+    pub snoozed: Vec<Watch>,
 }
 
 impl Radar {
@@ -63,8 +75,12 @@ impl Radar {
     pub fn new<'a>(watches: impl IntoIterator<Item = &'a Watch>, today: &str) -> Self {
         let mut radar = Self::default();
         for w in watches {
+            if w.ownership_is(OwnState::NotInterested) {
+                continue;
+            }
             match &w.release {
                 Some(r) if !r.is_out(today) => radar.coming.push(w.clone()),
+                _ if w.interested() && w.hidden(today) => radar.snoozed.push(w.clone()),
                 _ if w.interested() => radar.out_now.push(w.clone()),
                 _ => {}
             }
@@ -75,10 +91,19 @@ impl Radar {
             let date = w.release.as_ref().map_or("", |r| r.date.as_str());
             (key(date), w.id.title())
         });
-        radar.out_now.sort_by_cached_key(|w| {
-            let added = w.ownership.as_ref().map_or("", |o| o.added.as_str());
-            (key(added), w.id.title())
-        });
+        // Waiting longest first: since it was added, or since it came back
+        // from a snooze.
+        let since = |w: &Watch| {
+            let o = w.ownership.as_ref();
+            let back = o.map_or("", |o| o.hidden_until.as_str());
+            let added = o.map_or("", |o| o.added.as_str());
+            (
+                key(if back.trim().is_empty() { added } else { back }),
+                w.id.title(),
+            )
+        };
+        radar.out_now.sort_by_cached_key(since);
+        radar.snoozed.sort_by_cached_key(since);
         radar
     }
 }
@@ -137,17 +162,42 @@ mod tests {
             watch("owned-0007", &[("ownership.ron", "(state: Owned)")]),
             watch("plain-0008", &[("status.ron", "(state: Playing)")]),
             watch("broken-0009", &[("ownership.ron", "(state: Maybe)")]),
+            watch(
+                "back-again-0010",
+                &[(
+                    "ownership.ron",
+                    "(added: \"2024-01-01\", hidden_until: \"2026-09-01\", snoozes: 1)",
+                )],
+            ),
+            watch(
+                "put-off-0011",
+                &[(
+                    "ownership.ron",
+                    "(hidden_until: \"2026-11-01\", snoozes: 2)",
+                )],
+            ),
+            watch(
+                "nope-0012",
+                &[
+                    ("ownership.ron", "(state: NotInterested)"),
+                    ("release.ron", "(date: \"2027\")"),
+                ],
+            ),
         ]
         .into_iter()
         .flatten()
         .collect();
-        assert_eq!(watches.len(), 7, "plain and broken files are not watched");
+        assert_eq!(watches.len(), 10, "plain and broken files are not watched");
 
         let radar = Radar::new(&watches, today);
         assert_eq!(slugs(&radar.coming), ["early", "next-week", "someday"]);
-        assert_eq!(slugs(&radar.out_now), ["old-find", "came-out", "no-date"]);
+        assert_eq!(
+            slugs(&radar.out_now),
+            ["old-find", "back-again", "came-out", "no-date"]
+        );
+        assert_eq!(slugs(&radar.snoozed), ["put-off"]);
         assert!(radar.coming[0].date_passed(today));
         assert!(!radar.coming[1].date_passed(today));
-        assert!(radar.out_now[1].date_passed(today));
+        assert!(radar.out_now[2].date_passed(today));
     }
 }

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use eframe::egui;
-use things_core::components::{Release, Stage, to_ron};
+use things_core::components::{OwnState, PlayState, Release, Stage, Status, to_ron};
 use things_core::radar::{Radar, Watch};
 use things_core::search::{Doc, Query, Suggestion, Vocabulary};
 use things_core::{EntityId, Store};
@@ -19,6 +19,8 @@ pub struct ThingsApp {
     /// The radar and the day it was sorted for, rebuilt on change.
     radar: Option<(String, Radar)>,
     spot: Spot,
+    /// The last radar triage, so a misclick can be taken back.
+    undo: Option<Undo>,
     search: String,
     /// The last search and what it found, so typing doesn't rescan per frame.
     hits: Option<(String, Vec<EntityId>)>,
@@ -53,6 +55,26 @@ struct Completion {
 }
 
 const MAX_SUGGESTIONS: usize = 8;
+
+/// What to do with a thing on the radar, like answering an Anki card.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Triage {
+    /// Hide it for a while, longer each time.
+    Later,
+    /// Bought it and starting now: Owned, and play status Playing.
+    PlayNow,
+    /// Off the radar for good.
+    NotInterested,
+    /// Back from a snooze early.
+    ShowNow,
+}
+
+/// Files as they were before a triage. `None` means the file didn't exist.
+struct Undo {
+    id: EntityId,
+    message: String,
+    files: Vec<(&'static str, Option<String>)>,
+}
 
 /// The quick-capture form on the radar: something seen in passing.
 #[derive(Default)]
@@ -91,6 +113,8 @@ enum Action {
     Home,
     /// Create an entity from the quick-capture form.
     Spot,
+    Triage(EntityId, Triage),
+    Undo,
 }
 
 impl ThingsApp {
@@ -103,6 +127,7 @@ impl ThingsApp {
             watches: HashMap::new(),
             radar: None,
             spot: Spot::default(),
+            undo: None,
             search: String::new(),
             hits: None,
             vocab: None,
@@ -382,6 +407,8 @@ impl ThingsApp {
                 self.open = None;
             }
             Action::Spot => self.spot(),
+            Action::Triage(id, triage) => self.triage(id, triage),
+            Action::Undo => self.undo(),
             Action::Save(i) => self.save(i),
             Action::SaveAll => self.save_all(),
             Action::Delete(i) => {
@@ -434,6 +461,78 @@ impl ThingsApp {
         }
         self.reindex(&id);
         self.spot = Spot::default();
+    }
+
+    /// Applies a radar decision by rewriting the entity's files.
+    fn triage(&mut self, id: EntityId, triage: Triage) {
+        let entity = match self.store.load(&id) {
+            Ok(entity) => entity,
+            Err(e) => return self.error = Some(e.to_string()),
+        };
+        let before = |path: &str| {
+            entity
+                .components
+                .iter()
+                .find(|c| c.path == path)
+                .map(|c| c.text.clone())
+        };
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let mut ownership = self
+            .watches
+            .get(&id)
+            .and_then(|w| w.ownership.clone())
+            .unwrap_or_else(|| components::interested("", ""));
+        let title = id.title();
+        let mut files = vec![("ownership.ron", before("ownership.ron"))];
+        let message = match triage {
+            Triage::Later => {
+                let back = ownership.snooze(&today).unwrap_or_default().to_owned();
+                format!("{title} is off the radar until {back}.")
+            }
+            Triage::PlayNow => {
+                ownership.state = OwnState::Owned;
+                ownership.hidden_until.clear();
+                files.push(("status.ron", before("status.ron")));
+                format!("{title} is owned and playing.")
+            }
+            Triage::NotInterested => {
+                ownership.state = OwnState::NotInterested;
+                format!("{title} is off the radar for good.")
+            }
+            Triage::ShowNow => {
+                ownership.hidden_until.clear();
+                format!("{title} is back on the radar.")
+            }
+        };
+        let mut writes = vec![("ownership.ron", to_ron(&ownership))];
+        if triage == Triage::PlayNow {
+            let status = Status {
+                state: PlayState::Playing,
+            };
+            writes.push(("status.ron", to_ron(&status)));
+        }
+        for (path, text) in writes {
+            let text = text.expect("components always serialise");
+            if let Err(e) = self.store.write(&id, path, &text) {
+                self.error = Some(e.to_string());
+            }
+        }
+        self.reindex(&id);
+        self.undo = Some(Undo { id, message, files });
+    }
+
+    fn undo(&mut self) {
+        let Some(undo) = self.undo.take() else { return };
+        for (path, text) in undo.files {
+            let result = match text {
+                Some(text) => self.store.write(&undo.id, path, &text),
+                None => self.store.remove(&undo.id, path),
+            };
+            if let Err(e) = result {
+                self.error = Some(e.to_string());
+            }
+        }
+        self.reindex(&undo.id);
     }
 
     fn library_ui(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
@@ -572,6 +671,14 @@ impl ThingsApp {
 
         ui.heading("Radar");
         ui.weak("Things you want to get to. Pick one from the library to see all of it.");
+        if let Some(undo) = &self.undo {
+            ui.horizontal(|ui| {
+                ui.label(&undo.message);
+                if ui.small_button("Undo").clicked() {
+                    actions.push(Action::Undo);
+                }
+            });
+        }
         ui.add_space(6.0);
 
         egui::Frame::group(ui.style()).show(ui, |ui| {
@@ -635,6 +742,7 @@ impl ThingsApp {
                             "1.0 date passed: still in early access?",
                         );
                     }
+                    triage_buttons(ui, w, &[Triage::NotInterested], actions);
                 });
             }
             ui.add_space(10.0);
@@ -662,10 +770,80 @@ impl ThingsApp {
                     if !link.is_empty() {
                         ui.hyperlink_to("link", link);
                     }
+                    let later = format!("Later ({})", snooze_label(ownership.next_snooze_days()));
+                    let buttons = [Triage::NotInterested, Triage::PlayNow, Triage::Later];
+                    triage_buttons_labelled(ui, w, &buttons, Some(&later), actions);
                 });
+            }
+
+            if !radar.snoozed.is_empty() {
+                ui.add_space(10.0);
+                egui::CollapsingHeader::new(format!("Snoozed ({})", radar.snoozed.len()))
+                    .id_salt("snoozed")
+                    .show(ui, |ui| {
+                        for w in &radar.snoozed {
+                            let o = w.ownership.as_ref().expect("snoozed things have ownership");
+                            ui.horizontal(|ui| {
+                                ui.monospace(format!("{:<10}", o.hidden_until.trim()));
+                                title_link(ui, w, actions);
+                                ui.weak(format!("put off {}×", o.snoozes));
+                                triage_buttons(
+                                    ui,
+                                    w,
+                                    &[Triage::NotInterested, Triage::ShowNow],
+                                    actions,
+                                );
+                            });
+                        }
+                    });
             }
         });
     }
+}
+
+/// `7` -> `1 week`, `30` -> `1 month`.
+fn snooze_label(days: i64) -> String {
+    match days {
+        d if d < 30 && d % 7 == 0 => match d / 7 {
+            1 => "1 week".to_owned(),
+            w => format!("{w} weeks"),
+        },
+        d if d >= 30 => match d / 30 {
+            1 => "1 month".to_owned(),
+            m => format!("{m} months"),
+        },
+        d => format!("{d} days"),
+    }
+}
+
+/// Small buttons at the right end of a radar row.
+fn triage_buttons(ui: &mut egui::Ui, w: &Watch, which: &[Triage], actions: &mut Vec<Action>) {
+    triage_buttons_labelled(ui, w, which, None, actions);
+}
+
+fn triage_buttons_labelled(
+    ui: &mut egui::Ui,
+    w: &Watch,
+    which: &[Triage],
+    later: Option<&str>,
+    actions: &mut Vec<Action>,
+) {
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        for &triage in which {
+            let (label, hint) = match triage {
+                Triage::Later => (
+                    later.unwrap_or("Later"),
+                    "Hide it for a while, longer each time",
+                ),
+                Triage::PlayNow => ("Play now", "Mark it owned and playing"),
+                Triage::NotInterested => ("Not interested", "Take it off the radar for good"),
+                Triage::ShowNow => ("Show now", "Bring it back on the radar"),
+            };
+            if ui.small_button(label).on_hover_text(hint).clicked() {
+                actions.push(Action::Triage(w.id.clone(), triage));
+            }
+        }
+    });
 }
 
 fn title_link(ui: &mut egui::Ui, w: &Watch, actions: &mut Vec<Action>) {

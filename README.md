@@ -60,8 +60,15 @@ shows what you want to get to:
   whether it's still in early access.
 - **Interested, out now**: things marked Interested that you could play
   today, oldest first, so the ones you forgot about come back up.
+- **Snoozed**: things put off with **Later**, until the day they come back.
 - **Spotted something?** takes a name, where you saw it, a link and an
   optional release date, and adds the thing as Interested in one go.
+
+Each row works like an Anki card. **Later** hides it for a week, then two,
+a month, two, four and six, so things you keep putting off bother you less.
+**Play now** marks it owned and sets play status to Playing. **Not
+interested** takes it off the radar for good but keeps the record, so it
+isn't added twice. The last choice can be undone from the top of the radar.
 
 ![The radar on the sample data](docs/screenshots/radar.png)
 

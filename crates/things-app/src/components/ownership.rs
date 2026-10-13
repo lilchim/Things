@@ -33,6 +33,7 @@ pub fn interested(via: &str, link: &str) -> Ownership {
         added: chrono::Local::now().format("%Y-%m-%d").to_string(),
         via: via.trim().to_owned(),
         link: link.trim().to_owned(),
+        ..Ownership::default()
     }
 }
 
@@ -74,6 +75,24 @@ impl Editor for Ownership {
                     .desired_width(100.0),
             );
             ui.end_row();
+
+            if !self.hidden_until.trim().is_empty() {
+                ui.label("Snoozed");
+                ui.horizontal(|ui| {
+                    let times = match self.snoozes {
+                        1 => "once".to_owned(),
+                        n => format!("{n} times"),
+                    };
+                    ui.label(format!(
+                        "off the radar until {}, put off {times}",
+                        self.hidden_until.trim()
+                    ));
+                    if ui.small_button("Show now").clicked() {
+                        self.hidden_until.clear();
+                    }
+                });
+                ui.end_row();
+            }
         });
     }
 
