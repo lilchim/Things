@@ -21,9 +21,13 @@
 //! too. A hand-written `steam.ron` with `developer: "Blizzard"` is
 //! searchable as `developer:blizzard` and `steam:blizzard` with no new code.
 
+mod complete;
+
 use std::collections::BTreeSet;
 
 use crate::Entity;
+
+pub use complete::{Suggestion, Vocabulary};
 
 /// A parsed search line. Every term must hold for an entity to match.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -46,7 +50,17 @@ pub struct Doc {
     title: String,
     /// (field name, value), both normalised.
     fields: Vec<(String, String)>,
+    /// Field names as written, for listing and completion.
+    keys: BTreeSet<String>,
+    /// The subset of `keys` that name a whole component file.
+    files: BTreeSet<String>,
+    /// (field name, value) as written, for short values only: tags, enum
+    /// variants, names. Notes and journal text are searched, never suggested.
+    words: BTreeSet<(String, String)>,
 }
+
+/// Values longer than this are prose, not something to suggest.
+const MAX_WORD_LEN: usize = 40;
 
 impl Query {
     pub fn parse(input: &str) -> Self {
@@ -137,29 +151,35 @@ impl Doc {
     pub fn new(entity: &Entity) -> Self {
         let mut doc = Doc {
             title: normalise(&entity.id.title()),
-            fields: Vec::new(),
+            ..Doc::default()
         };
         for component in &entity.components {
             let first = component.path.split('/').next().unwrap_or_default();
-            let name = normalise(first.split_once('.').map_or(first, |(stem, _)| stem));
+            let stem = first.split_once('.').map_or(first, |(stem, _)| stem);
+            doc.keys.insert(stem.to_owned());
+            doc.files.insert(stem.to_owned());
             if component.path.ends_with(".ron") {
                 scan_ron(&component.text, |inner, value| {
-                    let value = normalise(&value);
-                    for field in inner {
-                        doc.fields.push((normalise(field), value.clone()));
+                    let normalised = normalise(&value);
+                    for name in inner.iter().map(String::as_str).chain([stem]) {
+                        doc.fields.push((normalise(name), normalised.clone()));
+                        doc.keys.insert(name.to_owned());
+                        if value.chars().count() <= MAX_WORD_LEN {
+                            doc.words.insert((name.to_owned(), value.clone()));
+                        }
                     }
-                    doc.fields.push((name.clone(), value));
                 });
             } else {
-                doc.fields.push((name, normalise(&component.text)));
+                doc.fields
+                    .push((normalise(stem), normalise(&component.text)));
             }
         }
         doc
     }
 
-    /// Every field name, to show what can be searched.
-    pub fn keys(&self) -> BTreeSet<&str> {
-        self.fields.iter().map(|(name, _)| name.as_str()).collect()
+    /// Every field name as written, to show what can be searched.
+    pub fn keys(&self) -> impl Iterator<Item = &str> {
+        self.keys.iter().map(String::as_str)
     }
 }
 
@@ -447,11 +467,11 @@ mod tests {
     #[test]
     fn keys_list_what_is_searchable() {
         let doc = diablo();
-        let keys: Vec<_> = doc.keys().into_iter().collect();
+        let keys: Vec<_> = doc.keys().collect();
         assert_eq!(
             keys,
             [
-                "app id",
+                "app_id",
                 "developer",
                 "extra",
                 "journal",

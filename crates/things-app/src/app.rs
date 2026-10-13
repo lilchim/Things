@@ -1,7 +1,7 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 
 use eframe::egui;
-use things_core::search::{Doc, Query};
+use things_core::search::{Doc, Query, Suggestion, Vocabulary};
 use things_core::{EntityId, Store};
 
 use crate::components::{self, Editor, Kind, Raw};
@@ -15,6 +15,9 @@ pub struct ThingsApp {
     search: String,
     /// The last search and what it found, so typing doesn't rescan per frame.
     hits: Option<(String, Vec<EntityId>)>,
+    /// Keys and values for completion, rebuilt when the index changes.
+    vocab: Option<Vocabulary>,
+    completion: Completion,
     new_name: String,
     open: Option<OpenEntity>,
     error: Option<String>,
@@ -26,6 +29,23 @@ struct OpenEntity {
     id: EntityId,
     components: Vec<OpenComponent>,
 }
+
+/// Suggestions for the token being typed in the search box.
+#[derive(Default)]
+struct Completion {
+    /// The search line these suggestions were made for.
+    line: String,
+    items: Vec<Suggestion>,
+    selected: usize,
+    /// Arrow keys moved the selection, so Enter picks it.
+    navigated: bool,
+    /// Escape hides the list until the line changes.
+    dismissed: bool,
+    /// The pointer was over the list last frame; keeps it open for a click.
+    hovered: bool,
+}
+
+const MAX_SUGGESTIONS: usize = 8;
 
 struct OpenComponent {
     path: String,
@@ -61,6 +81,8 @@ impl ThingsApp {
             docs: HashMap::new(),
             search: String::new(),
             hits: None,
+            vocab: None,
+            completion: Completion::default(),
             new_name: String::new(),
             open: None,
             error: None,
@@ -83,6 +105,9 @@ impl ThingsApp {
 
     fn reindex(&mut self, id: &EntityId) {
         self.hits = None;
+        self.vocab = None;
+        self.completion.line.clear();
+        self.completion.items.clear();
         match self.store.load(id) {
             Ok(entity) => {
                 self.docs.insert(id.clone(), Doc::new(&entity));
@@ -109,6 +134,106 @@ impl ThingsApp {
             self.hits = Some((self.search.clone(), hits));
         }
         &self.hits.as_ref().expect("just filled").1
+    }
+
+    /// Recomputes suggestions when the search line changed.
+    fn refresh_completion(&mut self) {
+        let vocab = self
+            .vocab
+            .get_or_insert_with(|| Vocabulary::new(self.docs.values()));
+        if self.completion.line == self.search {
+            return;
+        }
+        let items = vocab.suggest(&self.search, MAX_SUGGESTIONS);
+        self.completion = Completion {
+            line: self.search.clone(),
+            items,
+            hovered: self.completion.hovered,
+            ..Completion::default()
+        };
+    }
+
+    /// The search box, with suggestions for the token being typed: arrows
+    /// pick one, Tab (or Enter after arrows) takes it, Escape hides them.
+    fn search_ui(&mut self, ui: &mut egui::Ui) {
+        let id = ui.make_persistent_id("search");
+        self.refresh_completion();
+        let c = &mut self.completion;
+        let focused = ui.memory(|m| m.has_focus(id));
+        let open = (focused || c.hovered) && !c.dismissed && !c.items.is_empty();
+
+        let mut accept = None;
+        if open && focused {
+            let n = c.items.len();
+            ui.input_mut(|i| {
+                use egui::{Key, Modifiers};
+                if i.consume_key(Modifiers::NONE, Key::ArrowDown) {
+                    c.selected = (c.selected + 1) % n;
+                    c.navigated = true;
+                }
+                if i.consume_key(Modifiers::NONE, Key::ArrowUp) {
+                    c.selected = (c.selected + n - 1) % n;
+                    c.navigated = true;
+                }
+                if i.consume_key(Modifiers::NONE, Key::Tab)
+                    || (c.navigated && i.consume_key(Modifiers::NONE, Key::Enter))
+                {
+                    accept = Some(c.selected);
+                }
+                if i.consume_key(Modifiers::NONE, Key::Escape) {
+                    c.dismissed = true;
+                }
+            });
+        }
+
+        // While the list is up, Tab and Escape belong to it, not to focus.
+        let filter = egui::EventFilter {
+            tab: open,
+            escape: open,
+            vertical_arrows: true,
+            horizontal_arrows: true,
+        };
+        ui.add(
+            egui::TextEdit::singleline(&mut self.search)
+                .id(id)
+                .hint_text("Search: mood:chill -status:finished")
+                .event_filter(filter)
+                .desired_width(f32::INFINITY),
+        )
+        .on_hover_ui(|ui| search_help(ui, self.vocab.as_ref()));
+
+        if open {
+            let c = &self.completion;
+            let list = egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                for (i, item) in c.items.iter().enumerate() {
+                    ui.horizontal(|ui| {
+                        if ui.selectable_label(i == c.selected, &item.label).clicked() {
+                            accept = Some(i);
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.weak(item.count.to_string());
+                        });
+                    });
+                }
+            });
+            self.completion.hovered = list.response.contains_pointer();
+        } else {
+            self.completion.hovered = false;
+        }
+
+        if let Some(i) = accept {
+            self.search = self.completion.items[i].line.clone();
+            self.completion.hovered = false;
+            // Keep typing where the suggestion ended.
+            let mut state = egui::TextEdit::load_state(ui.ctx(), id).unwrap_or_default();
+            let end = egui::text::CCursor::new(self.search.chars().count());
+            state
+                .cursor
+                .set_char_range(Some(egui::text::CCursorRange::one(end)));
+            state.store(ui.ctx(), id);
+            ui.memory_mut(|m| m.request_focus(id));
+        }
     }
 
     /// Reads an entity's files and opens each with the kind that claims it.
@@ -240,12 +365,7 @@ impl ThingsApp {
 
     fn library_ui(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
         ui.heading("Library");
-        ui.add(
-            egui::TextEdit::singleline(&mut self.search)
-                .hint_text("Search: mood:chill -status:finished")
-                .desired_width(f32::INFINITY),
-        )
-        .on_hover_ui(|ui| self.search_help(ui));
+        self.search_ui(ui);
         if !self.search.trim().is_empty() {
             let shown = self.hits().len();
             ui.weak(format!("{shown} of {}", self.ids.len()));
@@ -282,19 +402,6 @@ impl ThingsApp {
                 ui.weak("Nothing here yet. Add a thing above.");
             }
         });
-    }
-
-    fn search_help(&self, ui: &mut egui::Ui) {
-        ui.label("key:value keeps things whose field contains the value.");
-        ui.label("key:a,b matches either; key: alone means it has that field.");
-        ui.label("Plain words search titles and everything written.");
-        ui.label("Put - in front to exclude, quotes to keep spaces.");
-        let keys: BTreeSet<&str> = self.docs.values().flat_map(Doc::keys).collect();
-        if !keys.is_empty() {
-            ui.separator();
-            let keys: Vec<&str> = keys.into_iter().collect();
-            ui.weak(format!("Keys in your library: {}", keys.join(", ")));
-        }
     }
 
     fn entity_ui(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
@@ -403,5 +510,18 @@ impl eframe::App for ThingsApp {
 
     fn on_exit(&mut self) {
         self.save_all();
+    }
+}
+
+fn search_help(ui: &mut egui::Ui, vocab: Option<&Vocabulary>) {
+    ui.label("key:value keeps things whose field contains the value.");
+    ui.label("key:a,b matches either; key: alone means it has that field.");
+    ui.label("Plain words search titles and everything written.");
+    ui.label("Put - in front to exclude, quotes to keep spaces.");
+    ui.label("Tab takes a suggestion; arrows pick one, Escape hides them.");
+    let keys: Vec<&str> = vocab.into_iter().flat_map(Vocabulary::keys).collect();
+    if !keys.is_empty() {
+        ui.separator();
+        ui.weak(format!("Keys in your library: {}", keys.join(", ")));
     }
 }

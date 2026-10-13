@@ -40,7 +40,13 @@ hand-written `steam.ron` with `developer: "Blizzard"` is searchable as
 `developer:blizzard` right away. Hover the search box to see every key in
 your library.
 
-![Searching the sample data](docs/screenshots/search.png)
+While you type, the box suggests keys and values that exist in your
+library, most used first: `mo` offers `moods:`, `moods:` offers every mood
+tag, and `glo` offers `moods:gloomy`. Tab takes the highlighted suggestion,
+the arrow keys move through them (then Enter takes one), and Escape hides
+them.
+
+![Suggestions for mood: on the sample data](docs/screenshots/search.png)
 
 ## Layout
 
