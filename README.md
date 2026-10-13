@@ -19,6 +19,29 @@ window saves too.
 On Linux, eframe needs the usual windowing libraries at runtime
 (`libxkbcommon-x11`, `libGL`/`libEGL`, and Wayland or X11).
 
+## Search
+
+The box above the library takes one line of tokens:
+
+```
+mood:chill,cozy -status:finished developer:"blizzard north" noveria
+```
+
+- `key:value` keeps things with a field whose name starts with `key` and
+  whose value contains `value` (`mood` finds `moods.ron`).
+- `key:a,b` matches either value; `key:` alone means the thing has that field.
+- Plain words search titles and everything written in the components.
+- `-` in front excludes; quotes keep spaces together. Case, `-` and `_`
+  don't matter.
+
+Fields come from the files, not from code: every component is a field named
+after its file, and every named field inside a RON file is one too. A
+hand-written `steam.ron` with `developer: "Blizzard"` is searchable as
+`developer:blizzard` right away. Hover the search box to see every key in
+your library.
+
+![Searching the sample data](docs/screenshots/search.png)
+
 ## Layout
 
 - `crates/things-core`: entity IDs, the file store, and the data formats of

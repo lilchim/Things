@@ -1,4 +1,7 @@
+use std::collections::{BTreeSet, HashMap};
+
 use eframe::egui;
+use things_core::search::{Doc, Query};
 use things_core::{EntityId, Store};
 
 use crate::components::{self, Editor, Kind, Raw};
@@ -7,7 +10,11 @@ pub struct ThingsApp {
     store: Store,
     kinds: Vec<Box<dyn Kind>>,
     ids: Vec<EntityId>,
-    filter: String,
+    /// What search sees of each entity, kept in step with every write.
+    docs: HashMap<EntityId, Doc>,
+    search: String,
+    /// The last search and what it found, so typing doesn't rescan per frame.
+    hits: Option<(String, Vec<EntityId>)>,
     new_name: String,
     open: Option<OpenEntity>,
     error: Option<String>,
@@ -51,7 +58,9 @@ impl ThingsApp {
             store,
             kinds: components::registry(),
             ids: Vec::new(),
-            filter: String::new(),
+            docs: HashMap::new(),
+            search: String::new(),
+            hits: None,
             new_name: String::new(),
             open: None,
             error: None,
@@ -60,11 +69,46 @@ impl ThingsApp {
         app
     }
 
+    /// Re-reads the entity list and every entity for the search index.
     fn refresh_list(&mut self) {
         match self.store.list() {
             Ok(ids) => self.ids = ids,
             Err(e) => self.error = Some(e.to_string()),
         }
+        self.docs.clear();
+        for id in self.ids.clone() {
+            self.reindex(&id);
+        }
+    }
+
+    fn reindex(&mut self, id: &EntityId) {
+        self.hits = None;
+        match self.store.load(id) {
+            Ok(entity) => {
+                self.docs.insert(id.clone(), Doc::new(&entity));
+            }
+            Err(e) => {
+                self.docs.remove(id);
+                self.error = Some(e.to_string());
+            }
+        }
+    }
+
+    /// Entities matching the search line, in library order.
+    fn hits(&mut self) -> &[EntityId] {
+        if self.hits.as_ref().is_none_or(|(q, _)| *q != self.search) {
+            let query = Query::parse(&self.search);
+            let hits = self
+                .ids
+                .iter()
+                .filter(|id| {
+                    query.is_empty() || self.docs.get(id).is_some_and(|d| query.matches(d))
+                })
+                .cloned()
+                .collect();
+            self.hits = Some((self.search.clone(), hits));
+        }
+        &self.hits.as_ref().expect("just filled").1
     }
 
     /// Reads an entity's files and opens each with the kind that claims it.
@@ -118,8 +162,10 @@ impl ThingsApp {
         let text = component.editor.text();
         match self.store.write(&open.id, &component.path, &text) {
             Ok(()) => component.saved = text,
-            Err(e) => self.error = Some(e.to_string()),
+            Err(e) => return self.error = Some(e.to_string()),
         }
+        let id = open.id.clone();
+        self.reindex(&id);
     }
 
     fn save_all(&mut self) {
@@ -147,7 +193,10 @@ impl ThingsApp {
                 match self.store.create(&name) {
                     Ok(id) => {
                         self.new_name.clear();
-                        self.refresh_list();
+                        if let Err(e) = self.store.list().map(|ids| self.ids = ids) {
+                            self.error = Some(e.to_string());
+                        }
+                        self.reindex(&id);
                         self.open_entity(id);
                     }
                     Err(e) => self.error = Some(e.to_string()),
@@ -165,7 +214,10 @@ impl ThingsApp {
                 };
                 self.save_all();
                 match self.store.write(&id, &path, &text) {
-                    Ok(()) => self.open_entity(id),
+                    Ok(()) => {
+                        self.reindex(&id);
+                        self.open_entity(id);
+                    }
                     Err(e) => self.error = Some(e.to_string()),
                 }
             }
@@ -177,6 +229,8 @@ impl ThingsApp {
                 match self.store.remove(&open.id, &path) {
                     Ok(()) => {
                         open.components.remove(i);
+                        let id = open.id.clone();
+                        self.reindex(&id);
                     }
                     Err(e) => self.error = Some(e.to_string()),
                 }
@@ -187,10 +241,15 @@ impl ThingsApp {
     fn library_ui(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
         ui.heading("Library");
         ui.add(
-            egui::TextEdit::singleline(&mut self.filter)
-                .hint_text("Filter")
+            egui::TextEdit::singleline(&mut self.search)
+                .hint_text("Search: mood:chill -status:finished")
                 .desired_width(f32::INFINITY),
-        );
+        )
+        .on_hover_ui(|ui| self.search_help(ui));
+        if !self.search.trim().is_empty() {
+            let shown = self.hits().len();
+            ui.weak(format!("{shown} of {}", self.ids.len()));
+        }
         ui.separator();
 
         ui.horizontal(|ui| {
@@ -206,14 +265,12 @@ impl ThingsApp {
         });
         ui.separator();
 
-        let filter = self.filter.to_lowercase();
+        self.hits();
+        let hits = &self.hits.as_ref().expect("just filled").1;
         let selected = self.open.as_ref().map(|o| &o.id);
         egui::ScrollArea::vertical().show(ui, |ui| {
-            for id in &self.ids {
+            for id in hits {
                 let title = id.title();
-                if !filter.is_empty() && !title.to_lowercase().contains(&filter) {
-                    continue;
-                }
                 let response = ui
                     .selectable_label(selected == Some(id), title)
                     .on_hover_text(id.to_string());
@@ -225,6 +282,19 @@ impl ThingsApp {
                 ui.weak("Nothing here yet. Add a thing above.");
             }
         });
+    }
+
+    fn search_help(&self, ui: &mut egui::Ui) {
+        ui.label("key:value keeps things whose field contains the value.");
+        ui.label("key:a,b matches either; key: alone means it has that field.");
+        ui.label("Plain words search titles and everything written.");
+        ui.label("Put - in front to exclude, quotes to keep spaces.");
+        let keys: BTreeSet<&str> = self.docs.values().flat_map(Doc::keys).collect();
+        if !keys.is_empty() {
+            ui.separator();
+            let keys: Vec<&str> = keys.into_iter().collect();
+            ui.weak(format!("Keys in your library: {}", keys.join(", ")));
+        }
     }
 
     fn entity_ui(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
