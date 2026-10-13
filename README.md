@@ -31,6 +31,8 @@ mood:chill,cozy -status:finished developer:"blizzard north" noveria
   whose value contains `value` (`mood` finds `moods.ron`).
 - `key:a,b` matches either value; `key:` alone means the thing has that field.
 - Plain words search titles and everything written in the components.
+- `key:>value` (also `<`, `>=`, `<=`) compares: numbers as numbers, dates
+  as dates. `today` means today, so `date:>today` is everything not out yet.
 - `-` in front excludes; quotes keep spaces together. Case, `-` and `_`
   don't matter.
 
@@ -48,6 +50,25 @@ them.
 
 ![Suggestions for mood: on the sample data](docs/screenshots/search.png)
 
+## Radar
+
+With no thing open (or after pressing **Radar** above the library), the app
+shows what you want to get to:
+
+- **Coming out**: everything with a Release that isn't out yet, soonest
+  first. Early access counts as not out; if its date passes the radar asks
+  whether it's still in early access.
+- **Interested, out now**: things marked Interested that you could play
+  today, oldest first, so the ones you forgot about come back up.
+- **Spotted something?** takes a name, where you saw it, a link and an
+  optional release date, and adds the thing as Interested in one go.
+
+![The radar on the sample data](docs/screenshots/radar.png)
+
+Searches get close to the same lists: `ownership:interested -release:` and
+`release: -stage:released`. Play status stays about playing; ownership and
+release are their own components.
+
 ## Layout
 
 - `crates/things-core`: entity IDs, the file store, and the data formats of
@@ -62,6 +83,8 @@ things/
   entities/
     mass-effect-7f3a/        readable slug + short ID
       status.ron             Status(state: Playing)
+      ownership.ron          Interested or Owned, when added, seen via, link
+      release.ron            Release(date: "2026-10-19", stage: Announced)
       moods.ron              Tags(tags: ["epic", "story-heavy"])
       gameplay.ron           Tags(tags: ["rpg", "single-player"])
       notes.md
