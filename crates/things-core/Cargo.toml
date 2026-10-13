@@ -1,0 +1,15 @@
+[package]
+name = "things-core"
+description = "Entities and file-backed components for Things"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+fastrand.workspace = true
+ron.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

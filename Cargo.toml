@@ -1,0 +1,18 @@
+[workspace]
+resolver = "3"
+members = ["crates/things-core", "crates/things-app"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace.dependencies]
+things-core = { path = "crates/things-core" }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+eframe = "0.36"
+fastrand = "2"
+ron = "0.12"
+serde = { version = "1", features = ["derive"] }
+tempfile = "3"
+thiserror = "2"
