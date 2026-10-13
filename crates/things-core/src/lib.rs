@@ -9,6 +9,7 @@
 
 pub mod components;
 mod id;
+pub mod search;
 mod store;
 
 pub use id::{EntityId, ParseIdError};
