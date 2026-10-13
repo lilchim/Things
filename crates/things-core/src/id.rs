@@ -53,18 +53,22 @@ impl EntityId {
 
     /// A display name guessed from the slug: `mass-effect-2` -> `Mass Effect 2`.
     pub fn title(&self) -> String {
-        self.slug
-            .split('-')
-            .map(|word| {
-                let mut chars = word.chars();
-                match chars.next() {
-                    Some(first) => first.to_uppercase().chain(chars).collect(),
-                    None => String::new(),
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(" ")
+        title_case(&self.slug)
     }
+}
+
+/// `mass-effect-2` -> `Mass Effect 2`.
+pub(crate) fn title_case(slug: &str) -> String {
+    slug.split('-')
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().chain(chars).collect(),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 impl fmt::Display for EntityId {
@@ -74,7 +78,7 @@ impl fmt::Display for EntityId {
 }
 
 /// Lowercase ASCII words joined by single dashes. Falls back to `thing`.
-fn slugify(name: &str) -> String {
+pub(crate) fn slugify(name: &str) -> String {
     let mut slug = String::new();
     for c in name.chars() {
         if c.is_ascii_alphanumeric() {

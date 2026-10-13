@@ -102,6 +102,7 @@ mod tests {
     fn watch(folder: &str, files: &[(&str, &str)]) -> Option<Watch> {
         Watch::new(&Entity {
             id: EntityId::parse(folder).unwrap(),
+            collection: String::new(),
             components: files
                 .iter()
                 .map(|(path, text)| ComponentFile {

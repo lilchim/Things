@@ -1,0 +1,7 @@
+Collection(
+    name: "Tasks",
+    starts_with: [
+        "notes.md",
+    ],
+    radar: false,
+)

@@ -58,7 +58,48 @@ pub fn registry() -> Vec<Box<dyn Kind>> {
     ]
 }
 
+/// The files a new thing starts with, for a collection's `starts_with`:
+/// each made the way "Add component" makes it. A path no kind makes starts
+/// out as an empty file, so a collection can name components the app
+/// doesn't know yet.
+pub fn starting_files(kinds: &[Box<dyn Kind>], paths: &[String]) -> Vec<(String, String)> {
+    paths
+        .iter()
+        .map(|path| {
+            let made = kinds
+                .iter()
+                .find(|k| k.matches(path))
+                .and_then(|k| k.create(&[]));
+            let text = match made {
+                Some((made, text)) if made == *path => text,
+                _ => String::new(),
+            };
+            (path.clone(), text)
+        })
+        .collect()
+}
+
 /// Shared by kinds that live in exactly one file.
 fn single_file(file: &str, existing: &[&str], text: String) -> Option<(String, String)> {
     (!existing.contains(&file)).then(|| (file.to_owned(), text))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn starting_files_use_each_kind_or_start_empty() {
+        let paths = ["status.ron", "notes.md", "due.ron"].map(String::from);
+        let files = starting_files(&registry(), &paths);
+        assert_eq!(
+            files[0],
+            (
+                "status.ron".into(),
+                "Status(\n    state: Backlog,\n)\n".into()
+            )
+        );
+        assert_eq!(files[1], ("notes.md".into(), String::new()));
+        assert_eq!(files[2], ("due.ron".into(), String::new()));
+    }
 }

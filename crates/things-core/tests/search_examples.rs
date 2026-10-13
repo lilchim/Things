@@ -18,6 +18,7 @@ fn search_on(query: &str, today: &str) -> Vec<String> {
         .list()
         .unwrap()
         .into_iter()
+        .map(|(id, _)| id)
         .filter(|id| query.matches(&Doc::new(&store.load(id).unwrap())))
         .map(|id| id.slug().to_owned())
         .collect()
@@ -31,6 +32,8 @@ fn example_library() {
             "hades-2",
             "lumen-drift",
             "mass-effect",
+            "mow-the-lawn",
+            "renew-passport",
             "stardew-valley",
             "tiny-orchard"
         ]
@@ -38,7 +41,10 @@ fn example_library() {
     assert_eq!(search("mood:chill"), ["stardew-valley", "tiny-orchard"]);
     assert_eq!(search("mood:tense,epic -status:playing"), ["hades-2"]);
     assert_eq!(search("gameplay:rpg noveria"), ["mass-effect"]);
-    assert_eq!(search("notes:"), ["mass-effect", "stardew-valley"]);
+    assert_eq!(
+        search("notes: collection:games"),
+        ["mass-effect", "stardew-valley"]
+    );
     assert_eq!(search("co-op"), ["stardew-valley"]);
     assert!(search("developer:blizzard").is_empty());
 }
@@ -54,4 +60,17 @@ fn interest_and_release() {
     assert_eq!(search("date:>today"), ["lumen-drift"]);
     assert!(search_on("date:>today", "2026-10-19").is_empty());
     assert_eq!(search("added:<2026-09"), ["tiny-orchard"]);
+}
+
+#[test]
+fn collections() {
+    assert_eq!(
+        search("collection:tasks"),
+        ["mow-the-lawn", "renew-passport"]
+    );
+    assert_eq!(search("saturday"), ["mow-the-lawn"]);
+    assert_eq!(
+        search("-collection:games notes:"),
+        search("collection:tasks")
+    );
 }

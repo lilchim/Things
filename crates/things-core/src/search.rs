@@ -208,6 +208,16 @@ impl Doc {
             title: normalise(&entity.id.title()),
             ..Doc::default()
         };
+        // The collection reads like a field, so `collection:tasks` and
+        // `-collection:games` work when searching everything.
+        if !entity.collection.is_empty() {
+            let key = "collection";
+            doc.fields
+                .push((key.to_owned(), normalise(&entity.collection)));
+            doc.keys.insert(key.to_owned());
+            doc.words
+                .insert((key.to_owned(), entity.collection.clone()));
+        }
         for component in &entity.components {
             let first = component.path.split('/').next().unwrap_or_default();
             let stem = first.split_once('.').map_or(first, |(stem, _)| stem);
@@ -415,6 +425,7 @@ mod tests {
     fn entity(folder: &str, files: &[(&str, &str)]) -> Doc {
         Doc::new(&Entity {
             id: EntityId::parse(folder).unwrap(),
+            collection: String::new(),
             components: files
                 .iter()
                 .map(|(path, text)| ComponentFile {
