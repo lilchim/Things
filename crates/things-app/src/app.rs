@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 
 use eframe::egui;
+use things_core::components::{OwnState, PlayState, Release, Stage, Status, to_ron};
+use things_core::radar::{Radar, Watch};
 use things_core::search::{Doc, Query, Suggestion, Vocabulary};
 use things_core::{EntityId, Store};
 
@@ -12,6 +14,13 @@ pub struct ThingsApp {
     ids: Vec<EntityId>,
     /// What search sees of each entity, kept in step with every write.
     docs: HashMap<EntityId, Doc>,
+    /// Ownership and release of each entity that has them, for the radar.
+    watches: HashMap<EntityId, Watch>,
+    /// The radar and the day it was sorted for, rebuilt on change.
+    radar: Option<(String, Radar)>,
+    spot: Spot,
+    /// The last radar triage, so a misclick can be taken back.
+    undo: Option<Undo>,
     search: String,
     /// The last search and what it found, so typing doesn't rescan per frame.
     hits: Option<(String, Vec<EntityId>)>,
@@ -47,6 +56,34 @@ struct Completion {
 
 const MAX_SUGGESTIONS: usize = 8;
 
+/// What to do with a thing on the radar, like answering an Anki card.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Triage {
+    /// Not now: one point up, so it sinks below the rest.
+    Later,
+    /// Bought it and starting now: Owned, and play status Playing.
+    PlayNow,
+    /// Off the radar for good.
+    NotInterested,
+}
+
+/// Files as they were before a triage. `None` means the file didn't exist.
+struct Undo {
+    id: EntityId,
+    message: String,
+    files: Vec<(&'static str, Option<String>)>,
+}
+
+/// The quick-capture form on the radar: something seen in passing.
+#[derive(Default)]
+struct Spot {
+    name: String,
+    via: String,
+    link: String,
+    /// Optional release date; filled in means it isn't out yet.
+    date: String,
+}
+
 struct OpenComponent {
     path: String,
     label: String,
@@ -70,6 +107,12 @@ enum Action {
     Save(usize),
     SaveAll,
     Delete(usize),
+    /// Close the open entity and show the radar.
+    Home,
+    /// Create an entity from the quick-capture form.
+    Spot,
+    Triage(EntityId, Triage),
+    Undo,
 }
 
 impl ThingsApp {
@@ -79,6 +122,10 @@ impl ThingsApp {
             kinds: components::registry(),
             ids: Vec::new(),
             docs: HashMap::new(),
+            watches: HashMap::new(),
+            radar: None,
+            spot: Spot::default(),
+            undo: None,
             search: String::new(),
             hits: None,
             vocab: None,
@@ -98,6 +145,7 @@ impl ThingsApp {
             Err(e) => self.error = Some(e.to_string()),
         }
         self.docs.clear();
+        self.watches.clear();
         for id in self.ids.clone() {
             self.reindex(&id);
         }
@@ -106,14 +154,20 @@ impl ThingsApp {
     fn reindex(&mut self, id: &EntityId) {
         self.hits = None;
         self.vocab = None;
+        self.radar = None;
         self.completion.line.clear();
         self.completion.items.clear();
         match self.store.load(id) {
             Ok(entity) => {
                 self.docs.insert(id.clone(), Doc::new(&entity));
+                match Watch::new(&entity) {
+                    Some(watch) => self.watches.insert(id.clone(), watch),
+                    None => self.watches.remove(id),
+                };
             }
             Err(e) => {
                 self.docs.remove(id);
+                self.watches.remove(id);
                 self.error = Some(e.to_string());
             }
         }
@@ -346,6 +400,13 @@ impl ThingsApp {
                     Err(e) => self.error = Some(e.to_string()),
                 }
             }
+            Action::Home => {
+                self.save_all();
+                self.open = None;
+            }
+            Action::Spot => self.spot(),
+            Action::Triage(id, triage) => self.triage(id, triage),
+            Action::Undo => self.undo(),
             Action::Save(i) => self.save(i),
             Action::SaveAll => self.save_all(),
             Action::Delete(i) => {
@@ -363,8 +424,123 @@ impl ThingsApp {
         }
     }
 
+    /// Creates an entity marked Interested from the quick-capture form, with
+    /// a release if a date was given, and stays on the radar for the next.
+    fn spot(&mut self) {
+        let name = self.spot.name.trim().to_owned();
+        if name.is_empty() {
+            return;
+        }
+        let release = Release {
+            date: self.spot.date.trim().to_owned(),
+            stage: Stage::Announced,
+        };
+        if !release.date_is_valid() {
+            return self.error = Some("Release date must be YYYY-MM-DD, YYYY-MM or YYYY.".into());
+        }
+        let id = match self.store.create(&name) {
+            Ok(id) => id,
+            Err(e) => return self.error = Some(e.to_string()),
+        };
+        let ownership = components::interested(&self.spot.via, &self.spot.link);
+        let mut files = vec![("ownership.ron", to_ron(&ownership))];
+        if !release.date.is_empty() {
+            files.push(("release.ron", to_ron(&release)));
+        }
+        for (path, text) in files {
+            let text = text.expect("components always serialise");
+            if let Err(e) = self.store.write(&id, path, &text) {
+                self.error = Some(e.to_string());
+            }
+        }
+        match self.store.list() {
+            Ok(ids) => self.ids = ids,
+            Err(e) => self.error = Some(e.to_string()),
+        }
+        self.reindex(&id);
+        self.spot = Spot::default();
+    }
+
+    /// Applies a radar decision by rewriting the entity's files.
+    fn triage(&mut self, id: EntityId, triage: Triage) {
+        let entity = match self.store.load(&id) {
+            Ok(entity) => entity,
+            Err(e) => return self.error = Some(e.to_string()),
+        };
+        let before = |path: &str| {
+            entity
+                .components
+                .iter()
+                .find(|c| c.path == path)
+                .map(|c| c.text.clone())
+        };
+        let mut ownership = self
+            .watches
+            .get(&id)
+            .and_then(|w| w.ownership.clone())
+            .unwrap_or_else(|| components::interested("", ""));
+        let title = id.title();
+        let mut files = vec![("ownership.ron", before("ownership.ron"))];
+        let message = match triage {
+            Triage::Later => {
+                ownership.score += 1;
+                format!("{title} moved down the radar (score {}).", ownership.score)
+            }
+            Triage::PlayNow => {
+                ownership.state = OwnState::Owned;
+                files.push(("status.ron", before("status.ron")));
+                format!("{title} is owned and playing.")
+            }
+            Triage::NotInterested => {
+                ownership.state = OwnState::NotInterested;
+                format!("{title} is off the radar for good.")
+            }
+        };
+        let mut writes = vec![("ownership.ron", to_ron(&ownership))];
+        if triage == Triage::PlayNow {
+            let status = Status {
+                state: PlayState::Playing,
+            };
+            writes.push(("status.ron", to_ron(&status)));
+        }
+        for (path, text) in writes {
+            let text = text.expect("components always serialise");
+            if let Err(e) = self.store.write(&id, path, &text) {
+                self.error = Some(e.to_string());
+            }
+        }
+        self.reindex(&id);
+        self.undo = Some(Undo { id, message, files });
+    }
+
+    fn undo(&mut self) {
+        let Some(undo) = self.undo.take() else { return };
+        for (path, text) in undo.files {
+            let result = match text {
+                Some(text) => self.store.write(&undo.id, path, &text),
+                None => self.store.remove(&undo.id, path),
+            };
+            if let Err(e) = result {
+                self.error = Some(e.to_string());
+            }
+        }
+        self.reindex(&undo.id);
+    }
+
     fn library_ui(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
-        ui.heading("Library");
+        ui.horizontal(|ui| {
+            ui.heading("Library");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let home = self.open.is_none();
+                if ui
+                    .add_enabled(!home, egui::Button::new("Radar"))
+                    .on_hover_text("Games coming out and games you want to try")
+                    .clicked()
+                {
+                    actions.push(Action::Home);
+                }
+            });
+        });
         self.search_ui(ui);
         if !self.search.trim().is_empty() {
             let shown = self.hits().len();
@@ -406,8 +582,7 @@ impl ThingsApp {
 
     fn entity_ui(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
         let Some(open) = &mut self.open else {
-            ui.centered_and_justified(|ui| ui.weak("Pick a thing from the library."));
-            return;
+            return self.radar_ui(ui, actions);
         };
 
         ui.horizontal(|ui| {
@@ -473,6 +648,154 @@ impl ThingsApp {
                 ui.add_space(6.0);
             }
         });
+    }
+}
+
+impl ThingsApp {
+    /// The home screen: what's coming out, what I meant to try, and a quick
+    /// way to add something seen in passing.
+    fn radar_ui(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        if self.radar.as_ref().is_none_or(|(day, _)| *day != today) {
+            self.radar = Some((today.clone(), Radar::new(self.watches.values(), &today)));
+        }
+        let radar = &self.radar.as_ref().expect("just filled").1;
+
+        ui.heading("Radar");
+        ui.weak("Things you want to get to. Pick one from the library to see all of it.");
+        if let Some(undo) = &self.undo {
+            ui.horizontal(|ui| {
+                ui.label(&undo.message);
+                if ui.small_button("Undo").clicked() {
+                    actions.push(Action::Undo);
+                }
+            });
+        }
+        ui.add_space(6.0);
+
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.strong("Spotted something?");
+            let spot = &mut self.spot;
+            let mut submit = false;
+            egui::Grid::new("spot").num_columns(2).show(ui, |ui| {
+                let mut field = |ui: &mut egui::Ui, label: &str, text: &mut String, hint: &str| {
+                    ui.label(label);
+                    let r = ui.add(
+                        egui::TextEdit::singleline(text)
+                            .hint_text(hint)
+                            .desired_width(f32::INFINITY),
+                    );
+                    submit |= r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    ui.end_row();
+                };
+                field(ui, "Name", &mut spot.name, "the game");
+                field(
+                    ui,
+                    "Seen via",
+                    &mut spot.via,
+                    "a friend's link, a tweet, a trailer…",
+                );
+                field(ui, "Link", &mut spot.link, "https://…");
+                field(
+                    ui,
+                    "Out on",
+                    &mut spot.date,
+                    "leave empty if it's out (2026-10-19, 2026-10, 2027)",
+                );
+            });
+            let ready = !spot.name.trim().is_empty();
+            if ui
+                .add_enabled(ready, egui::Button::new("Add as interested"))
+                .clicked()
+                || (submit && ready)
+            {
+                actions.push(Action::Spot);
+            }
+        });
+        ui.add_space(6.0);
+
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            ui.strong(format!("Coming out ({})", radar.coming.len()));
+            if radar.coming.is_empty() {
+                ui.weak("Nothing announced. Give a thing a Release to see it here.");
+            }
+            for w in &radar.coming {
+                let release = w.release.as_ref().expect("coming things have a release");
+                ui.horizontal(|ui| {
+                    let date = release.date.trim();
+                    let date = if date.is_empty() { "unknown" } else { date };
+                    ui.monospace(format!("{date:<10}"));
+                    title_link(ui, w, actions);
+                    ui.weak(release.stage.label());
+                    if w.date_passed(&today) {
+                        ui.colored_label(
+                            ui.visuals().warn_fg_color,
+                            "1.0 date passed: still in early access?",
+                        );
+                    }
+                    triage_buttons(ui, w, &[Triage::NotInterested], actions);
+                });
+            }
+            ui.add_space(10.0);
+
+            ui.strong(format!("Interested, out now ({})", radar.out_now.len()));
+            if radar.out_now.is_empty() {
+                ui.weak("Nothing waiting. Spotted games you don't own show up here.");
+            }
+            for w in &radar.out_now {
+                let ownership = w
+                    .ownership
+                    .as_ref()
+                    .expect("interested things have ownership");
+                ui.horizontal(|ui| {
+                    let added = ownership.added.trim();
+                    ui.monospace(format!("{added:<10}"));
+                    title_link(ui, w, actions);
+                    if w.date_passed(&today) {
+                        ui.colored_label(ui.visuals().warn_fg_color, "just came out");
+                    }
+                    if !ownership.via.trim().is_empty() {
+                        ui.weak(format!("via {}", ownership.via.trim()));
+                    }
+                    let link = ownership.link.trim();
+                    if !link.is_empty() {
+                        ui.hyperlink_to("link", link);
+                    }
+                    if ownership.score > 0 {
+                        ui.weak(format!("put off {}×", ownership.score));
+                    }
+                    let buttons = [Triage::NotInterested, Triage::PlayNow, Triage::Later];
+                    triage_buttons(ui, w, &buttons, actions);
+                });
+            }
+        });
+    }
+}
+
+/// Small buttons at the right end of a radar row.
+fn triage_buttons(ui: &mut egui::Ui, w: &Watch, which: &[Triage], actions: &mut Vec<Action>) {
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        for &triage in which {
+            let (label, hint) = match triage {
+                Triage::Later => ("Later", "Move it down the list, below the rest"),
+                Triage::PlayNow => ("Play now", "Mark it owned and playing"),
+                Triage::NotInterested => ("Not interested", "Take it off the radar for good"),
+            };
+            if ui.small_button(label).on_hover_text(hint).clicked() {
+                actions.push(Action::Triage(w.id.clone(), triage));
+            }
+        }
+    });
+}
+
+fn title_link(ui: &mut egui::Ui, w: &Watch, actions: &mut Vec<Action>) {
+    if ui
+        .link(w.id.title())
+        .on_hover_text(w.id.to_string())
+        .clicked()
+    {
+        actions.push(Action::Select(w.id.clone()));
     }
 }
 

@@ -9,6 +9,7 @@
 
 pub mod components;
 mod id;
+pub mod radar;
 pub mod search;
 mod store;
 

@@ -6,12 +6,15 @@
 //! disk is ever hidden or lost.
 
 mod markdown;
+mod ownership;
 mod raw;
+mod release;
 mod status;
 mod tags;
 
 use eframe::egui;
 
+pub use ownership::interested;
 pub use raw::Raw;
 
 /// The in-memory, editable form of one component file.
@@ -40,6 +43,8 @@ pub trait Kind {
 pub fn registry() -> Vec<Box<dyn Kind>> {
     vec![
         Box::new(status::StatusKind),
+        Box::new(ownership::OwnershipKind),
+        Box::new(release::ReleaseKind),
         Box::new(tags::TagSetKind {
             file: "moods.ron",
             label: "Mood",

@@ -10,6 +10,9 @@
 //! - `key:a,b` matches either value. `key:` alone keeps entities that have
 //!   the field at all (`journal:`).
 //! - A bare word must appear in the title or anywhere in the components.
+//! - `key:>value`, `<`, `>=` and `<=` compare instead: numbers as numbers,
+//!   dates and other values starting with a digit as text, so
+//!   `date:>2026-10` and `date:<=today` work. `today` is today's date.
 //! - `-` in front of any term excludes instead. Quotes keep spaces together.
 //!
 //! Matching ignores case and treats `-` and `_` as spaces, so
@@ -42,6 +45,16 @@ struct Term {
     key: Option<String>,
     /// Any of these; empty means "has the field".
     values: Vec<String>,
+    /// Compare against the single value instead of looking for it.
+    cmp: Option<Cmp>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Cmp {
+    Lt,
+    Le,
+    Gt,
+    Ge,
 }
 
 /// What search sees of one entity: its title and every field value.
@@ -64,6 +77,12 @@ const MAX_WORD_LEN: usize = 40;
 
 impl Query {
     pub fn parse(input: &str) -> Self {
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        Self::parse_on(input, &today)
+    }
+
+    /// Parses with `today` (`YYYY-MM-DD`) standing in for the word `today`.
+    pub fn parse_on(input: &str, today: &str) -> Self {
         let mut terms = Vec::new();
         let mut chars = input.chars().peekable();
         loop {
@@ -72,7 +91,7 @@ impl Query {
                 break;
             }
             let negated = chars.next_if_eq(&'-').is_some();
-            if let Some(term) = read_term(&mut chars, negated) {
+            if let Some(term) = read_term(&mut chars, negated, today) {
                 terms.push(term);
             }
         }
@@ -91,7 +110,11 @@ impl Query {
 /// Reads one whitespace-separated term. Quoted parts may hold spaces, `:`
 /// and `,`; the first bare `:` splits key from value, and bare `,` after it
 /// separates alternatives.
-fn read_term(chars: &mut std::iter::Peekable<std::str::Chars>, negated: bool) -> Option<Term> {
+fn read_term(
+    chars: &mut std::iter::Peekable<std::str::Chars>,
+    negated: bool,
+    today: &str,
+) -> Option<Term> {
     let mut key = None;
     let mut parts = Vec::new();
     let mut current = String::new();
@@ -106,6 +129,29 @@ fn read_term(chars: &mut std::iter::Peekable<std::str::Chars>, negated: bool) ->
     }
     parts.push(current);
 
+    // `key:>value`: one value, compared. Quotes don't hide the operator.
+    let mut cmp = None;
+    if key.is_some() && parts.len() == 1 {
+        let part = parts[0].trim_start();
+        let (op, rest) = [
+            (">=", Cmp::Ge),
+            ("<=", Cmp::Le),
+            (">", Cmp::Gt),
+            ("<", Cmp::Lt),
+        ]
+        .into_iter()
+        .find_map(|(sym, op)| part.strip_prefix(sym).map(|rest| (op, rest)))
+        .unzip();
+        if let (Some(op), Some(rest)) = (op, rest) {
+            cmp = Some(op);
+            parts[0] = if rest.trim().eq_ignore_ascii_case("today") {
+                today.to_owned()
+            } else {
+                rest.to_owned()
+            };
+        }
+    }
+
     let values: Vec<String> = parts
         .iter()
         .map(|p| normalise(p))
@@ -117,16 +163,20 @@ fn read_term(chars: &mut std::iter::Peekable<std::str::Chars>, negated: bool) ->
             negated,
             key: None,
             values,
+            cmp: None,
         }),
+        // `date:>` with nothing to compare against reads as "has the field".
         Some(k) => Some(Term {
             negated,
             key: Some(k),
+            cmp: cmp.filter(|_| !values.is_empty()),
             values,
         }),
         None => (!values.is_empty()).then_some(Term {
             negated,
             key: None,
             values,
+            cmp: None,
         }),
     }
 }
@@ -140,8 +190,13 @@ impl Term {
             }),
             Some(key) => doc.fields.iter().any(|(name, value)| {
                 name.starts_with(key.as_str())
-                    && (self.values.is_empty()
-                        || self.values.iter().any(|v| value.contains(v.as_str())))
+                    && match (self.cmp, self.values.first()) {
+                        (Some(cmp), Some(bound)) => compare(value, bound, cmp),
+                        _ => {
+                            self.values.is_empty()
+                                || self.values.iter().any(|v| value.contains(v.as_str()))
+                        }
+                    }
             }),
         }
     }
@@ -181,6 +236,24 @@ impl Doc {
     pub fn keys(&self) -> impl Iterator<Item = &str> {
         self.keys.iter().map(String::as_str)
     }
+}
+
+/// Numbers compare as numbers. Otherwise both sides must start with a digit
+/// (dates, versions) and compare as text; `announced` is never `> 2026`.
+fn compare(value: &str, bound: &str, cmp: Cmp) -> bool {
+    let ordering = match (value.trim().parse::<f64>(), bound.trim().parse::<f64>()) {
+        (Ok(a), Ok(b)) => a.partial_cmp(&b),
+        _ => {
+            let digit = |s: &str| s.trim_start().starts_with(|c: char| c.is_ascii_digit());
+            (digit(value) && digit(bound)).then(|| value.trim().cmp(bound.trim()))
+        }
+    };
+    ordering.is_some_and(|o| match cmp {
+        Cmp::Lt => o.is_lt(),
+        Cmp::Le => o.is_le(),
+        Cmp::Gt => o.is_gt(),
+        Cmp::Ge => o.is_ge(),
+    })
 }
 
 /// Lowercase, with `-` and `_` read as spaces.
@@ -380,6 +453,7 @@ mod tests {
             negated,
             key: key.map(Into::into),
             values: values.iter().map(|v| (*v).into()).collect(),
+            cmp: None,
         };
         assert_eq!(
             q.terms,
@@ -440,6 +514,39 @@ mod tests {
         assert!(!find("-mood:gloomy", &d));
         assert!(find("-status:finished", &d));
         assert!(!find("diablo -andariel", &d));
+    }
+
+    #[test]
+    fn comparisons_order_dates_and_numbers() {
+        let d = entity(
+            "lumen-drift-c3d4",
+            &[
+                (
+                    "release.ron",
+                    "Release(date: \"2026-10-19\", stage: Announced)",
+                ),
+                ("steam.ron", "(app_id: 900, playtime: 12.5)"),
+            ],
+        );
+        let find = |q: &str| Query::parse_on(q, "2026-10-13").matches(&d);
+        assert!(find("date:>today"));
+        assert!(find("date:>=2026-10-19"));
+        assert!(find("date:<2027"));
+        assert!(find("date:>2026-10"));
+        assert!(!find("date:<today"));
+        assert!(!find("date:<=2026-10-18"));
+        assert!(find("app_id:>100"));
+        assert!(!find("app_id:<100"));
+        assert!(find("playtime:>=12.5"));
+        // Stage words never compare against a date, and ops respect `-`.
+        assert!(!find("release:<2000"));
+        assert!(find("-date:<today"));
+        // A bare operator means "has the field".
+        assert!(find("date:>"));
+        assert_eq!(
+            Query::parse_on("date:>\"today\"", "2026-10-13"),
+            Query::parse_on("date:>2026-10-13", "2026-10-13")
+        );
     }
 
     #[test]
