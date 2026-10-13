@@ -59,13 +59,13 @@ shows what you want to get to:
   first. Early access counts as not out; if its date passes the radar asks
   whether it's still in early access.
 - **Interested, out now**: things marked Interested that you could play
-  today, oldest first, so the ones you forgot about come back up.
-- **Snoozed**: things put off with **Later**, until the day they come back.
+  today, lowest score first, and oldest first within a score.
 - **Spotted something?** takes a name, where you saw it, a link and an
   optional release date, and adds the thing as Interested in one go.
 
-Each row works like an Anki card. **Later** hides it for a week, then two,
-a month, two, four and six, so things you keep putting off bother you less.
+Each row works a bit like an Anki card. **Later** adds a point to its
+score (stored in `ownership.ron`), so it drops below everything you haven't
+put off as often. Nothing is ever hidden; the list ranks itself over time.
 **Play now** marks it owned and sets play status to Playing. **Not
 interested** takes it off the radar for good but keeps the record, so it
 isn't added twice. The last choice can be undone from the top of the radar.

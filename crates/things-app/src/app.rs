@@ -59,14 +59,12 @@ const MAX_SUGGESTIONS: usize = 8;
 /// What to do with a thing on the radar, like answering an Anki card.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Triage {
-    /// Hide it for a while, longer each time.
+    /// Not now: one point up, so it sinks below the rest.
     Later,
     /// Bought it and starting now: Owned, and play status Playing.
     PlayNow,
     /// Off the radar for good.
     NotInterested,
-    /// Back from a snooze early.
-    ShowNow,
 }
 
 /// Files as they were before a triage. `None` means the file didn't exist.
@@ -476,7 +474,6 @@ impl ThingsApp {
                 .find(|c| c.path == path)
                 .map(|c| c.text.clone())
         };
-        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
         let mut ownership = self
             .watches
             .get(&id)
@@ -486,22 +483,17 @@ impl ThingsApp {
         let mut files = vec![("ownership.ron", before("ownership.ron"))];
         let message = match triage {
             Triage::Later => {
-                let back = ownership.snooze(&today).unwrap_or_default().to_owned();
-                format!("{title} is off the radar until {back}.")
+                ownership.score += 1;
+                format!("{title} moved down the radar (score {}).", ownership.score)
             }
             Triage::PlayNow => {
                 ownership.state = OwnState::Owned;
-                ownership.hidden_until.clear();
                 files.push(("status.ron", before("status.ron")));
                 format!("{title} is owned and playing.")
             }
             Triage::NotInterested => {
                 ownership.state = OwnState::NotInterested;
                 format!("{title} is off the radar for good.")
-            }
-            Triage::ShowNow => {
-                ownership.hidden_until.clear();
-                format!("{title} is back on the radar.")
             }
         };
         let mut writes = vec![("ownership.ron", to_ron(&ownership))];
@@ -770,74 +762,25 @@ impl ThingsApp {
                     if !link.is_empty() {
                         ui.hyperlink_to("link", link);
                     }
-                    let later = format!("Later ({})", snooze_label(ownership.next_snooze_days()));
+                    if ownership.score > 0 {
+                        ui.weak(format!("put off {}×", ownership.score));
+                    }
                     let buttons = [Triage::NotInterested, Triage::PlayNow, Triage::Later];
-                    triage_buttons_labelled(ui, w, &buttons, Some(&later), actions);
+                    triage_buttons(ui, w, &buttons, actions);
                 });
-            }
-
-            if !radar.snoozed.is_empty() {
-                ui.add_space(10.0);
-                egui::CollapsingHeader::new(format!("Snoozed ({})", radar.snoozed.len()))
-                    .id_salt("snoozed")
-                    .show(ui, |ui| {
-                        for w in &radar.snoozed {
-                            let o = w.ownership.as_ref().expect("snoozed things have ownership");
-                            ui.horizontal(|ui| {
-                                ui.monospace(format!("{:<10}", o.hidden_until.trim()));
-                                title_link(ui, w, actions);
-                                ui.weak(format!("put off {}×", o.snoozes));
-                                triage_buttons(
-                                    ui,
-                                    w,
-                                    &[Triage::NotInterested, Triage::ShowNow],
-                                    actions,
-                                );
-                            });
-                        }
-                    });
             }
         });
     }
 }
 
-/// `7` -> `1 week`, `30` -> `1 month`.
-fn snooze_label(days: i64) -> String {
-    match days {
-        d if d < 30 && d % 7 == 0 => match d / 7 {
-            1 => "1 week".to_owned(),
-            w => format!("{w} weeks"),
-        },
-        d if d >= 30 => match d / 30 {
-            1 => "1 month".to_owned(),
-            m => format!("{m} months"),
-        },
-        d => format!("{d} days"),
-    }
-}
-
 /// Small buttons at the right end of a radar row.
 fn triage_buttons(ui: &mut egui::Ui, w: &Watch, which: &[Triage], actions: &mut Vec<Action>) {
-    triage_buttons_labelled(ui, w, which, None, actions);
-}
-
-fn triage_buttons_labelled(
-    ui: &mut egui::Ui,
-    w: &Watch,
-    which: &[Triage],
-    later: Option<&str>,
-    actions: &mut Vec<Action>,
-) {
     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
         for &triage in which {
             let (label, hint) = match triage {
-                Triage::Later => (
-                    later.unwrap_or("Later"),
-                    "Hide it for a while, longer each time",
-                ),
+                Triage::Later => ("Later", "Move it down the list, below the rest"),
                 Triage::PlayNow => ("Play now", "Mark it owned and playing"),
                 Triage::NotInterested => ("Not interested", "Take it off the radar for good"),
-                Triage::ShowNow => ("Show now", "Bring it back on the radar"),
             };
             if ui.small_button(label).on_hover_text(hint).clicked() {
                 actions.push(Action::Triage(w.id.clone(), triage));

@@ -56,45 +56,14 @@ pub struct Ownership {
     pub via: String,
     /// A store page, post or anything to go back to.
     pub link: String,
-    /// Off the radar until this day (`YYYY-MM-DD`), like a card in Anki.
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub hidden_until: String,
-    /// How many times it was put off; each one hides it for longer.
+    /// Goes up each time I put it off. The radar shows the lowest first,
+    /// so things I keep skipping sink without ever disappearing.
     #[serde(skip_serializing_if = "is_zero")]
-    pub snoozes: u32,
+    pub score: u32,
 }
 
 fn is_zero(n: &u32) -> bool {
     *n == 0
-}
-
-/// The first "later" hides a thing for a week, each next one twice as long,
-/// up to about half a year.
-const SNOOZE_DAYS: [i64; 6] = [7, 14, 30, 60, 120, 180];
-
-impl Ownership {
-    /// How long the next "later" hides it for.
-    pub fn next_snooze_days(&self) -> i64 {
-        SNOOZE_DAYS[(self.snoozes as usize).min(SNOOZE_DAYS.len() - 1)]
-    }
-
-    /// Puts it off for longer than last time. `today` is `YYYY-MM-DD`.
-    /// Returns the day it comes back.
-    pub fn snooze(&mut self, today: &str) -> Option<&str> {
-        let today = chrono::NaiveDate::parse_from_str(today, "%Y-%m-%d").ok()?;
-        let days = self.next_snooze_days();
-        self.snoozes += 1;
-        self.hidden_until = (today + chrono::Days::new(days as u64))
-            .format("%Y-%m-%d")
-            .to_string();
-        Some(&self.hidden_until)
-    }
-
-    /// Snoozed and not due back yet.
-    pub fn is_hidden(&self, today: &str) -> bool {
-        let until = self.hidden_until.trim();
-        !until.is_empty() && until > today
-    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -302,24 +271,12 @@ mod tests {
     }
 
     #[test]
-    fn snoozing_hides_for_longer_each_time() {
+    fn score_is_only_written_once_used() {
         let mut own = Ownership::default();
+        assert!(!to_ron(&own).unwrap().contains("score"));
+        own.score += 2;
         let text = to_ron(&own).unwrap();
-        assert!(
-            !text.contains("hidden_until") && !text.contains("snoozes"),
-            "{text}"
-        );
-
-        assert_eq!(own.snooze("2026-10-13"), Some("2026-10-20"));
-        assert!(own.is_hidden("2026-10-19"));
-        assert!(!own.is_hidden("2026-10-20"));
-        assert_eq!(own.snooze("2026-10-20"), Some("2026-11-03"));
-        assert_eq!(own.snoozes, 2);
-        for _ in 0..10 {
-            own.snooze("2026-10-20");
-        }
-        assert_eq!(own.hidden_until, "2027-04-18", "capped at 180 days");
-        assert_eq!(from_ron::<Ownership>(&to_ron(&own).unwrap()).unwrap(), own);
-        assert_eq!(own.snooze("soon"), None);
+        assert!(text.contains("score: 2"), "{text}");
+        assert_eq!(from_ron::<Ownership>(&text).unwrap(), own);
     }
 }

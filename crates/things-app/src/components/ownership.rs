@@ -76,23 +76,12 @@ impl Editor for Ownership {
             );
             ui.end_row();
 
-            if !self.hidden_until.trim().is_empty() {
-                ui.label("Snoozed");
-                ui.horizontal(|ui| {
-                    let times = match self.snoozes {
-                        1 => "once".to_owned(),
-                        n => format!("{n} times"),
-                    };
-                    ui.label(format!(
-                        "off the radar until {}, put off {times}",
-                        self.hidden_until.trim()
-                    ));
-                    if ui.small_button("Show now").clicked() {
-                        self.hidden_until.clear();
-                    }
-                });
-                ui.end_row();
-            }
+            ui.label("Score");
+            ui.horizontal(|ui| {
+                ui.add(egui::DragValue::new(&mut self.score).range(0..=999));
+                ui.weak("each Later adds one; the radar shows the lowest first");
+            });
+            ui.end_row();
         });
     }
 
