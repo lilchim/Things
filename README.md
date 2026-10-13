@@ -107,6 +107,58 @@ Searches get close to the same lists: `ownership:interested -release:` and
 `release: -stage:released`. Play status stays about playing; ownership and
 release are their own components.
 
+## Tasks
+
+Any thing can have a **Tasks** component (`tasks.ron`): things you should
+or can do for it, such as a game's dailies, a chore or an errand. Each task
+either happens once, by an optional date, or repeats:
+
+- **Daily**, **Weekly** from a weekday, or **Monthly** from a day of the
+  month. These start over on the calendar whether you did them or not.
+- **Every few days**: due again so many days after you last did it, like
+  mowing the lawn every 14 days.
+
+A repeating task has a **day starts at** hour, so a game's dailies can flip
+at its reset (say 4:00) instead of at midnight. Before that hour it's still
+yesterday for that task.
+
+Ticking a task records the day in the file, so the component shows how it's
+gone lately ("done 4 of the last 5 days"). Unticking takes the latest day
+back out.
+
+![Tasks on a game](docs/screenshots/task-editor.png)
+
+**Tasks** above the library (with a count of what's due) shows every task
+from every collection:
+
+- **Overdue**: one-offs and every-few-days tasks past their date.
+- **To do now**: dailies, weeklies and monthlies not done yet this time
+  round, and anything due today. Whatever resets or falls due soonest
+  comes first.
+- **Coming up**: dated one-offs and every-few-days tasks not due yet.
+- **Anytime**: one-offs with no date.
+- **Done for now**: ticked this time round, so a misclick can be unticked.
+
+![The tasks view on the sample data](docs/screenshots/tasks.png)
+
+```
+Tasks(
+    tasks: [
+        Task(
+            name: "Daily activity and Waveplates",
+            repeat: Daily,          or Weekly(Mon), Monthly(15), Every(14), Once
+            resets_at: 4,           the hour a new day starts; 0 if left out
+            done: ["2026-10-12", "2026-10-13"],
+        ),
+        Task(name: "Book passport photos", repeat: Once, due: "2026-11-01"),
+    ],
+)
+```
+
+The Tasks collection starts new things with a task list. Task fields are
+searchable like any other: `repeat:daily`, `due:<2026-11`, or `tasks:` for
+everything that has some.
+
 ## Layout
 
 - `crates/things-core`: entity IDs, collections, the file store, and the
@@ -125,6 +177,7 @@ things/
       ownership.ron          Interested or Owned, when added, seen via, link
       release.ron            Release(date: "2026-10-19", stage: Announced)
       moods.ron              Tags(tags: ["epic", "story-heavy"])
+      tasks.ron              Tasks(tasks: [Task(name: "Dailies", repeat: Daily), ...])
       gameplay.ron           Tags(tags: ["rpg", "single-player"])
       notes.md
       journal/
@@ -132,6 +185,7 @@ things/
   tasks/
     collection.ron
     mow-the-lawn-1a2b/
+      tasks.ron
       notes.md
 ```
 

@@ -1,9 +1,11 @@
 use std::collections::HashMap;
 
+use chrono::{NaiveDateTime, Timelike};
 use eframe::egui;
 use things_core::components::{OwnState, PlayState, Release, Stage, Status, to_ron};
 use things_core::radar::{Radar, Watch};
 use things_core::search::{Doc, Query, Suggestion, Vocabulary};
+use things_core::tasks::{self, Agenda, Entry, Tasks, When};
 use things_core::{Collection, EntityId, Manifest, Store};
 
 use crate::components::{self, Editor, Kind, Raw};
@@ -25,6 +27,12 @@ pub struct ThingsApp {
     watches: HashMap<EntityId, Watch>,
     /// The radar and the day it was sorted for, rebuilt on change.
     radar: Option<(String, Radar)>,
+    /// Each entity's task list, for the tasks view.
+    task_lists: HashMap<EntityId, Tasks>,
+    /// Every task sorted for the minute it was made, rebuilt on change.
+    agenda: Option<(NaiveDateTime, Agenda)>,
+    /// What the home screen shows when no thing is open.
+    home: Home,
     spot: Spot,
     /// The last radar triage, so a misclick can be taken back.
     undo: Option<Undo>,
@@ -64,6 +72,14 @@ struct Completion {
 }
 
 const MAX_SUGGESTIONS: usize = 8;
+
+/// The two home screens.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum Home {
+    #[default]
+    Radar,
+    Tasks,
+}
 
 /// What to do with a thing on the radar, like answering an Anki card.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,12 +137,14 @@ enum Action {
     Save(usize),
     SaveAll,
     Delete(usize),
-    /// Close the open entity and show the radar.
-    Home,
+    /// Close the open entity and show a home screen.
+    Home(Home),
     /// Create an entity from the quick-capture form.
     Spot,
     Triage(EntityId, Triage),
     Undo,
+    /// Tick a task (by its place in `tasks.ron`) done, or take it back.
+    Check(EntityId, usize, bool),
 }
 
 impl ThingsApp {
@@ -142,6 +160,9 @@ impl ThingsApp {
             docs: HashMap::new(),
             watches: HashMap::new(),
             radar: None,
+            task_lists: HashMap::new(),
+            agenda: None,
+            home: Home::default(),
             spot: Spot::default(),
             undo: None,
             search: String::new(),
@@ -163,6 +184,7 @@ impl ThingsApp {
         self.refresh_ids();
         self.docs.clear();
         self.watches.clear();
+        self.task_lists.clear();
         for id in self.ids.clone() {
             self.reindex(&id);
         }
@@ -189,6 +211,7 @@ impl ThingsApp {
         self.hits = None;
         self.vocab = None;
         self.radar = None;
+        self.agenda = None;
     }
 
     fn collection(&self, folder: &str) -> Option<&Collection> {
@@ -221,6 +244,7 @@ impl ThingsApp {
         self.hits = None;
         self.vocab = None;
         self.radar = None;
+        self.agenda = None;
         self.completion.line.clear();
         self.completion.items.clear();
         match self.store.load(id) {
@@ -230,10 +254,15 @@ impl ThingsApp {
                     Some(watch) => self.watches.insert(id.clone(), watch),
                     None => self.watches.remove(id),
                 };
+                match tasks::of(&entity) {
+                    Some(list) => self.task_lists.insert(id.clone(), list),
+                    None => self.task_lists.remove(id),
+                };
             }
             Err(e) => {
                 self.docs.remove(id);
                 self.watches.remove(id);
+                self.task_lists.remove(id);
                 self.error = Some(e.to_string());
             }
         }
@@ -510,13 +539,15 @@ impl ThingsApp {
                     Err(e) => self.error = Some(e.to_string()),
                 }
             }
-            Action::Home => {
+            Action::Home(home) => {
                 self.save_all();
                 self.open = None;
+                self.home = home;
             }
             Action::Spot => self.spot(),
             Action::Triage(id, triage) => self.triage(id, triage),
             Action::Undo => self.undo(),
+            Action::Check(id, index, done) => self.check(id, index, done),
             Action::Save(i) => self.save(i),
             Action::SaveAll => self.save_all(),
             Action::Delete(i) => {
@@ -653,17 +684,70 @@ impl ThingsApp {
         self.reindex(&undo.id);
     }
 
+    /// Ticks a task done today, or takes the latest tick back, in its
+    /// thing's `tasks.ron`.
+    fn check(&mut self, id: EntityId, index: usize, done: bool) {
+        let Some(mut list) = self.task_lists.get(&id).cloned() else {
+            return;
+        };
+        let Some(task) = list.tasks.get_mut(index) else {
+            return;
+        };
+        if done {
+            task.check(components::now());
+        } else {
+            task.uncheck();
+        }
+        let text = to_ron(&list).expect("tasks always serialise");
+        if let Err(e) = self.store.write(&id, tasks::FILE, &text) {
+            self.error = Some(e.to_string());
+        }
+        self.reindex(&id);
+    }
+
+    /// Every task, sorted for this minute.
+    fn agenda(&mut self) -> &Agenda {
+        let now = components::now();
+        let minute = now
+            .with_second(0)
+            .and_then(|t| t.with_nanosecond(0))
+            .unwrap_or(now);
+        if self.agenda.as_ref().is_none_or(|(at, _)| *at != minute) {
+            self.agenda = Some((minute, Agenda::new(&self.task_lists, now)));
+        }
+        &self.agenda.as_ref().expect("just filled").1
+    }
+
     fn library_ui(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
+        let to_do = {
+            let agenda = self.agenda();
+            agenda.overdue.len() + agenda.now.len()
+        };
         ui.horizontal(|ui| {
             ui.heading("Library");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let home = self.open.is_none();
-                if ui
-                    .add_enabled(!home, egui::Button::new("Radar"))
-                    .on_hover_text("Games coming out and games you want to try")
-                    .clicked()
-                {
-                    actions.push(Action::Home);
+                let home = self.open.is_none().then_some(self.home);
+                let tasks = if to_do > 0 {
+                    format!("Tasks ({to_do})")
+                } else {
+                    "Tasks".to_owned()
+                };
+                for (screen, label, hint) in [
+                    (Home::Tasks, tasks, "What to do now and what's coming up"),
+                    (
+                        Home::Radar,
+                        "Radar".to_owned(),
+                        "Games coming out and games you want to try",
+                    ),
+                ] {
+                    if ui
+                        .selectable_label(home == Some(screen), label)
+                        .on_hover_text(hint)
+                        .clicked()
+                        && home != Some(screen)
+                    {
+                        actions.push(Action::Home(screen));
+                    }
                 }
             });
         });
@@ -765,7 +849,10 @@ impl ThingsApp {
 
     fn entity_ui(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
         let Some(open) = &mut self.open else {
-            return self.radar_ui(ui, actions);
+            return match self.home {
+                Home::Radar => self.radar_ui(ui, actions),
+                Home::Tasks => self.tasks_ui(ui, actions),
+            };
         };
 
         let home = self.homes.get(&open.id).cloned().unwrap_or_default();
@@ -968,6 +1055,81 @@ impl ThingsApp {
             }
         });
     }
+}
+
+impl ThingsApp {
+    /// The other home screen: every task, by what needs doing.
+    fn tasks_ui(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
+        // Times on screen count down, and tasks reset on their own.
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_secs(30));
+        let now = components::now();
+        let agenda = self.agenda().clone();
+
+        ui.heading("Tasks");
+        ui.weak("Tasks from every thing. Give a thing a Tasks component to add some.");
+        ui.add_space(6.0);
+
+        if agenda.is_empty() {
+            ui.weak("No tasks yet. Open a game, add the Tasks component, and list its dailies.");
+            return;
+        }
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            let sections: [(&str, &[Entry], &str); 5] = [
+                ("Overdue", &agenda.overdue, ""),
+                ("To do now", &agenda.now, "All caught up."),
+                ("Coming up", &agenda.coming, ""),
+                ("Anytime", &agenda.anytime, ""),
+                ("Done for now", &agenda.done, ""),
+            ];
+            for (title, entries, empty) in sections {
+                if entries.is_empty() && empty.is_empty() {
+                    continue;
+                }
+                ui.strong(format!("{title} ({})", entries.len()));
+                if entries.is_empty() {
+                    ui.weak(empty);
+                }
+                for e in entries {
+                    task_row(ui, e, now, actions);
+                }
+                ui.add_space(10.0);
+            }
+        });
+    }
+}
+
+fn task_row(ui: &mut egui::Ui, e: &Entry, now: NaiveDateTime, actions: &mut Vec<Action>) {
+    ui.horizontal(|ui| {
+        let mut done = matches!(e.when, When::Done);
+        if ui.checkbox(&mut done, "").changed() {
+            actions.push(Action::Check(e.id.clone(), e.index, done));
+        }
+        let name = e.task.name.trim();
+        ui.label(if name.is_empty() {
+            "(unnamed task)"
+        } else {
+            name
+        });
+        if ui
+            .link(e.id.title())
+            .on_hover_text(e.id.to_string())
+            .clicked()
+        {
+            actions.push(Action::Select(e.id.clone()));
+        }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let text = components::describe(&e.task, e.when, now);
+            if matches!(e.when, When::Overdue { .. }) {
+                ui.colored_label(ui.visuals().warn_fg_color, text);
+            } else {
+                ui.weak(text);
+            }
+            if e.task.repeat != tasks::Repeat::Once {
+                ui.weak(e.task.repeat.label());
+            }
+        });
+    });
 }
 
 /// Small buttons at the right end of a radar row.

@@ -11,11 +11,13 @@ mod raw;
 mod release;
 mod status;
 mod tags;
+mod tasks;
 
 use eframe::egui;
 
 pub use ownership::interested;
 pub use raw::Raw;
+pub use tasks::{describe, now};
 
 /// The in-memory, editable form of one component file.
 pub trait Editor {
@@ -45,6 +47,7 @@ pub fn registry() -> Vec<Box<dyn Kind>> {
         Box::new(status::StatusKind),
         Box::new(ownership::OwnershipKind),
         Box::new(release::ReleaseKind),
+        Box::new(tasks::TasksKind),
         Box::new(tags::TagSetKind {
             file: "moods.ron",
             label: "Mood",

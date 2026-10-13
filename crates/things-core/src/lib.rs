@@ -14,6 +14,7 @@ mod id;
 pub mod radar;
 pub mod search;
 mod store;
+pub mod tasks;
 
 pub use collection::{Collection, Manifest};
 pub use id::{EntityId, ParseIdError};

@@ -1,0 +1,13 @@
+Tasks(
+    tasks: [
+        Task(
+            name: "Book passport photos",
+            repeat: Once,
+            due: "2026-11-01",
+        ),
+        Task(
+            name: "Send the online form",
+            repeat: Once,
+        ),
+    ],
+)

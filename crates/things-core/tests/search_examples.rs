@@ -2,8 +2,10 @@
 
 use std::path::Path;
 
+use chrono::NaiveDateTime;
 use things_core::Store;
 use things_core::search::{Doc, Query};
+use things_core::tasks::{self, Agenda, Entry};
 
 fn search(query: &str) -> Vec<String> {
     search_on(query, "2026-10-13")
@@ -35,7 +37,8 @@ fn example_library() {
             "mow-the-lawn",
             "renew-passport",
             "stardew-valley",
-            "tiny-orchard"
+            "tiny-orchard",
+            "wuthering-waves"
         ]
     );
     assert_eq!(search("mood:chill"), ["stardew-valley", "tiny-orchard"]);
@@ -73,4 +76,45 @@ fn collections() {
         search("-collection:games notes:"),
         search("collection:tasks")
     );
+}
+
+#[test]
+fn task_fields() {
+    assert_eq!(
+        search("tasks:"),
+        ["mow-the-lawn", "renew-passport", "wuthering-waves"]
+    );
+    assert_eq!(search("repeat:daily"), ["wuthering-waves"]);
+    assert_eq!(search("due:<2026-11"), ["wuthering-waves"]);
+}
+
+#[test]
+fn example_agenda() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/data");
+    let store = Store::open(root).unwrap();
+    let lists: Vec<_> = store
+        .list()
+        .unwrap()
+        .into_iter()
+        .filter_map(|(id, _)| Some((id.clone(), tasks::of(&store.load(&id).ok()?)?)))
+        .collect();
+    let now = NaiveDateTime::parse_from_str("2026-10-13 20:00", "%Y-%m-%d %H:%M").unwrap();
+    let agenda = Agenda::new(lists.iter().map(|(id, t)| (id, t)), now);
+    fn names(list: &[Entry]) -> Vec<&str> {
+        list.iter().map(|e| e.task.name.as_str()).collect()
+    }
+    assert_eq!(names(&agenda.overdue), ["Mow the lawn"]);
+    assert_eq!(
+        names(&agenda.now),
+        ["Daily activity and Waveplates", "Weekly bosses"]
+    );
+    assert_eq!(
+        names(&agenda.coming),
+        [
+            "Tower of Adversity",
+            "Spend the event shop currency",
+            "Book passport photos"
+        ]
+    );
+    assert_eq!(names(&agenda.anytime), ["Send the online form"]);
 }

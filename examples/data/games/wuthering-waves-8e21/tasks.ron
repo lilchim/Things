@@ -1,0 +1,36 @@
+Tasks(
+    tasks: [
+        Task(
+            name: "Daily activity and Waveplates",
+            repeat: Daily,
+            resets_at: 4,
+            done: [
+                "2026-10-08",
+                "2026-10-09",
+                "2026-10-11",
+                "2026-10-12",
+            ],
+        ),
+        Task(
+            name: "Weekly bosses",
+            repeat: Weekly(Mon),
+            resets_at: 4,
+            done: [
+                "2026-10-06",
+            ],
+        ),
+        Task(
+            name: "Tower of Adversity",
+            repeat: Every(28),
+            resets_at: 4,
+            done: [
+                "2026-09-22",
+            ],
+        ),
+        Task(
+            name: "Spend the event shop currency",
+            repeat: Once,
+            due: "2026-10-20",
+        ),
+    ],
+)
