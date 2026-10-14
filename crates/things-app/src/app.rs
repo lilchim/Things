@@ -4,11 +4,13 @@ use chrono::{NaiveDateTime, Timelike};
 use eframe::egui;
 use things_core::components::{OwnState, PlayState, Release, Stage, Status, to_ron};
 use things_core::radar::{Radar, Watch};
+use things_core::research::{self as steps, Facts, Finding, Standing, Step};
 use things_core::search::{Doc, Query, Suggestion, Vocabulary};
 use things_core::tasks::{self, Agenda, Entry, Tasks, When};
-use things_core::{Collection, EntityId, Manifest, Store};
+use things_core::{Collection, ComponentFile, Entity, EntityId, Manifest, Store};
 
 use crate::components::{self, Editor, Kind, Raw};
+use crate::research::{self, Job, Research};
 
 pub struct ThingsApp {
     store: Store,
@@ -46,7 +48,20 @@ pub struct ThingsApp {
     completion: Completion,
     new_name: String,
     open: Option<OpenEntity>,
+    /// Which side of a thing is on screen.
+    view: View,
+    research: Research,
     error: Option<String>,
+}
+
+/// A thing's two views.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum View {
+    /// Its components, with research hints if the collection shows them.
+    #[default]
+    Page,
+    /// Everything research could fill in, ready steps first.
+    Research,
 }
 
 /// The entity on screen. Editors hold the working state; the files are only
@@ -145,6 +160,19 @@ enum Action {
     Undo,
     /// Tick a task (by its place in `tasks.ron`) done, or take it back.
     Check(EntityId, usize, bool),
+    View(View),
+    /// Run a research step for the open thing; `true` skips the cache.
+    Run(Step, bool),
+    /// Run every step that's ready and hasn't been run.
+    RunAll,
+    /// Write a step's suggested file.
+    Accept(Step, String),
+    /// Add every suggested file that doesn't need a choice.
+    AcceptAll,
+    /// Stop asking about a step for the open thing, or start again.
+    Skip(Step, bool),
+    /// Turn research hints on or off for the open thing's collection.
+    Hints(bool),
 }
 
 impl ThingsApp {
@@ -171,6 +199,8 @@ impl ThingsApp {
             completion: Completion::default(),
             new_name: String::new(),
             open: None,
+            view: View::default(),
+            research: Research::new(research::cache_dir()),
             error: None,
         };
         app.refresh_list();
@@ -462,7 +492,24 @@ impl ThingsApp {
         }
     }
 
-    fn apply(&mut self, action: Action) {
+    /// The open thing as research sees it: its files as last saved.
+    fn open_files(&self) -> Option<Entity> {
+        let open = self.open.as_ref()?;
+        Some(Entity {
+            id: open.id.clone(),
+            collection: self.homes.get(&open.id).cloned().unwrap_or_default(),
+            components: open
+                .components
+                .iter()
+                .map(|c| ComponentFile {
+                    path: c.path.clone(),
+                    text: c.saved.clone(),
+                })
+                .collect(),
+        })
+    }
+
+    fn apply(&mut self, ctx: &egui::Context, action: Action) {
         match action {
             Action::Select(id) => {
                 // Leaving an entity keeps its edits rather than dropping them.
@@ -548,6 +595,70 @@ impl ThingsApp {
             Action::Triage(id, triage) => self.triage(id, triage),
             Action::Undo => self.undo(),
             Action::Check(id, index, done) => self.check(id, index, done),
+            Action::View(view) => self.view = view,
+            Action::Run(step, fresh) => {
+                if let Some(entity) = self.open_files() {
+                    let facts = Facts::of(&entity);
+                    self.research.run(ctx, &entity.id, step, facts, fresh);
+                }
+            }
+            Action::RunAll => {
+                let Some(entity) = self.open_files() else {
+                    return;
+                };
+                for (step, standing) in steps::plan(&entity) {
+                    let idle = self.research.job(&entity.id, step).is_none();
+                    if standing == Standing::Ready
+                        && idle
+                        && !self.research.is_skipped(&entity.id, step)
+                    {
+                        self.research
+                            .run(ctx, &entity.id, step, Facts::of(&entity), false);
+                    }
+                }
+            }
+            Action::Accept(step, text) => {
+                let Some(id) = self.open.as_ref().map(|o| o.id.clone()) else {
+                    return;
+                };
+                self.research.clear(&id, step);
+                self.apply(ctx, Action::Add(step.file().to_owned(), text));
+            }
+            Action::AcceptAll => {
+                let Some(entity) = self.open_files() else {
+                    return;
+                };
+                for (step, standing) in steps::plan(&entity) {
+                    if let (Standing::Ready, Some(Job::Found(Finding::File { text, .. }))) =
+                        (standing, self.research.job(&entity.id, step))
+                    {
+                        let text = text.clone();
+                        self.apply(ctx, Action::Accept(step, text));
+                    }
+                }
+            }
+            Action::Skip(step, skipped) => {
+                let Some(id) = self.open.as_ref().map(|o| o.id.clone()) else {
+                    return;
+                };
+                if let Err(e) = self.research.set_skipped(&id, step, skipped) {
+                    self.error = Some(e);
+                }
+            }
+            Action::Hints(on) => {
+                let Some(id) = self.open.as_ref().map(|o| &o.id) else {
+                    return;
+                };
+                let Some(c) = self.homes.get(id).and_then(|f| self.collection(f)) else {
+                    return;
+                };
+                let (folder, mut manifest) = (c.folder.clone(), c.manifest.clone());
+                manifest.hints = on;
+                match self.store.set_manifest(&folder, &manifest) {
+                    Ok(()) => self.refresh_ids(),
+                    Err(e) => self.error = Some(e.to_string()),
+                }
+            }
             Action::Save(i) => self.save(i),
             Action::SaveAll => self.save_all(),
             Action::Delete(i) => {
@@ -848,6 +959,16 @@ impl ThingsApp {
     }
 
     fn entity_ui(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
+        let plan = self
+            .open_files()
+            .map(|e| steps::plan(&e))
+            .unwrap_or_default();
+        let hints = self
+            .open
+            .as_ref()
+            .and_then(|o| self.homes.get(&o.id))
+            .and_then(|f| self.collection(f))
+            .is_some_and(|c| c.manifest.hints);
         let Some(open) = &mut self.open else {
             return match self.home {
                 Home::Radar => self.radar_ui(ui, actions),
@@ -898,13 +1019,68 @@ impl ThingsApp {
                 }
             });
         });
+        let id = open.id.clone();
+        let research = &self.research;
+        let ready = plan
+            .iter()
+            .filter(|(s, st)| *st == Standing::Ready && !research.is_skipped(&id, *s))
+            .count();
+        ui.horizontal(|ui| {
+            let label = match ready {
+                0 => "Research".to_owned(),
+                n => format!("Research ({n} ready)"),
+            };
+            for (view, label) in [(View::Page, "Page".to_owned()), (View::Research, label)] {
+                if ui.selectable_label(self.view == view, label).clicked() && self.view != view {
+                    actions.push(Action::View(view));
+                }
+            }
+            if self.view == View::Page {
+                let mut on = hints;
+                let hint = "Show what research could fill in as faded placeholders. \
+                            Applies to every thing in this collection.";
+                if ui
+                    .checkbox(&mut on, "Research hints")
+                    .on_hover_text(hint)
+                    .changed()
+                {
+                    actions.push(Action::Hints(on));
+                }
+            }
+        });
         ui.separator();
+        if self.view == View::Research {
+            return research_ui(ui, research, &id, &plan, actions);
+        }
 
         egui::ScrollArea::vertical().show(ui, |ui| {
             if open.components.is_empty() {
                 ui.weak("No components yet. Use “Add component” to give this thing some.");
             }
+            // Hints sit where their component would, in registry order.
+            let kinds = &self.kinds;
+            let kind_of = |path: &str| {
+                kinds
+                    .iter()
+                    .position(|k| k.matches(path))
+                    .unwrap_or(usize::MAX)
+            };
+            let mut hinted: Vec<_> = plan
+                .iter()
+                .filter(|(s, st)| {
+                    hints && *st != Standing::Recorded && !research.is_skipped(&id, *s)
+                })
+                .map(|(s, st)| (kind_of(s.file()), *s, st))
+                .collect();
+            hinted.sort_by_key(|(k, _, _)| *k);
+            let mut next = 0;
             for (i, component) in open.components.iter_mut().enumerate() {
+                let here = kind_of(&component.path);
+                while let Some((_, step, standing)) = hinted.get(next).filter(|h| h.0 < here) {
+                    step_ui(ui, research, &id, *step, standing, true, actions);
+                    ui.add_space(6.0);
+                    next += 1;
+                }
                 egui::Frame::group(ui.style()).show(ui, |ui| {
                     ui.set_width(ui.available_width());
                     ui.horizontal(|ui| {
@@ -928,6 +1104,10 @@ impl ThingsApp {
                     });
                     component.editor.ui(ui);
                 });
+                ui.add_space(6.0);
+            }
+            for (_, step, standing) in &hinted[next..] {
+                step_ui(ui, research, &id, *step, standing, true, actions);
                 ui.add_space(6.0);
             }
         });
@@ -1132,6 +1312,220 @@ fn task_row(ui: &mut egui::Ui, e: &Entry, now: NaiveDateTime, actions: &mut Vec<
     });
 }
 
+/// Everything research could fill in for one thing: ready steps (with
+/// their results) first, then what's waiting on something, what's recorded
+/// and what was skipped.
+fn research_ui(
+    ui: &mut egui::Ui,
+    research: &Research,
+    id: &EntityId,
+    plan: &[(Step, Standing)],
+    actions: &mut Vec<Action>,
+) {
+    let skipped = |s: Step| research.is_skipped(id, s);
+    let ready: Vec<_> = plan
+        .iter()
+        .filter(|(s, st)| *st == Standing::Ready && !skipped(*s))
+        .collect();
+    let idle = ready
+        .iter()
+        .filter(|(s, _)| research.job(id, *s).is_none())
+        .count();
+    let found = ready
+        .iter()
+        .filter(|(s, _)| matches!(research.job(id, *s), Some(Job::Found(Finding::File { .. }))))
+        .count();
+
+    ui.weak(
+        "What research could fill in. Nothing is written until you add it, \
+         and each thing you add can unlock more.",
+    );
+    ui.horizontal(|ui| {
+        if idle > 0 && ui.button(format!("Run all ready ({idle})")).clicked() {
+            actions.push(Action::RunAll);
+        }
+        if found > 0 && ui.button(format!("Add all found ({found})")).clicked() {
+            actions.push(Action::AcceptAll);
+        }
+    });
+    ui.add_space(6.0);
+
+    egui::ScrollArea::vertical().show(ui, |ui| {
+        ui.strong(format!("Ready ({})", ready.len()));
+        if ready.is_empty() {
+            ui.weak("Nothing to run right now.");
+        }
+        for (step, standing) in &ready {
+            step_ui(ui, research, id, *step, standing, false, actions);
+            ui.add_space(6.0);
+        }
+        ui.add_space(6.0);
+
+        let waiting: Vec<_> = plan
+            .iter()
+            .filter(|(s, st)| matches!(st, Standing::Waiting(_)) && !skipped(*s))
+            .collect();
+        if !waiting.is_empty() {
+            ui.strong(format!("Waiting ({})", waiting.len()));
+            for (step, standing) in waiting {
+                ui.horizontal(|ui| {
+                    ui.label(step.label());
+                    step_body(ui, research.job(id, *step), *step, standing, actions);
+                });
+            }
+            ui.add_space(10.0);
+        }
+
+        let recorded: Vec<_> = plan
+            .iter()
+            .filter(|(_, st)| *st == Standing::Recorded)
+            .collect();
+        if !recorded.is_empty() {
+            ui.strong(format!("Recorded ({})", recorded.len()));
+            for (step, _) in recorded {
+                ui.horizontal(|ui| {
+                    ui.label(step.label());
+                    ui.weak(step.file());
+                });
+            }
+            ui.add_space(10.0);
+        }
+
+        let skips: Vec<_> = plan
+            .iter()
+            .filter(|(s, st)| *st != Standing::Recorded && skipped(*s))
+            .collect();
+        if !skips.is_empty() {
+            ui.strong(format!("Skipped ({})", skips.len()));
+            for (step, _) in skips {
+                ui.horizontal(|ui| {
+                    ui.label(step.label());
+                    if ui.small_button("Ask again").clicked() {
+                        actions.push(Action::Skip(*step, false));
+                    }
+                });
+            }
+        }
+    });
+}
+
+/// One step in a frame: its name, where it looks, and what can be done
+/// with it now. `faded` is for the hints on a thing's page, until there's
+/// a result to look at.
+fn step_ui(
+    ui: &mut egui::Ui,
+    research: &Research,
+    id: &EntityId,
+    step: Step,
+    standing: &Standing,
+    faded: bool,
+    actions: &mut Vec<Action>,
+) {
+    let job = research.job(id, step);
+    egui::Frame::group(ui.style()).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        if faded && !matches!(job, Some(Job::Found(_) | Job::Failed(_))) {
+            ui.multiply_opacity(0.55);
+        }
+        ui.horizontal(|ui| {
+            ui.strong(step.label());
+            ui.weak(format!("from {}", step.source()));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .small_button("Skip")
+                    .on_hover_text("Stop suggesting this for this thing")
+                    .clicked()
+                {
+                    actions.push(Action::Skip(step, true));
+                }
+                ui.weak(step.file());
+            });
+        });
+        step_body(ui, job, step, standing, actions);
+    });
+}
+
+/// What a step shows: why it's waiting, a button to run it, that it's
+/// running, or what it found with the buttons to add or turn it down.
+fn step_body(
+    ui: &mut egui::Ui,
+    job: Option<&Job>,
+    step: Step,
+    standing: &Standing,
+    actions: &mut Vec<Action>,
+) {
+    let retry = |ui: &mut egui::Ui, actions: &mut Vec<Action>| {
+        if ui.small_button("Try again").clicked() {
+            actions.push(Action::Run(step, true));
+        }
+    };
+    match (standing, job) {
+        (Standing::Recorded, _) => {
+            ui.weak(format!("Recorded in {}.", step.file()));
+        }
+        (Standing::Waiting(needs), _) => {
+            let needs: Vec<&str> = needs.iter().map(|n| n.label()).collect();
+            ui.weak(format!("Needs {} first.", needs.join(" and ")));
+        }
+        (Standing::Ready, None) => {
+            if ui.button(step.verb()).clicked() {
+                actions.push(Action::Run(step, false));
+            }
+        }
+        (Standing::Ready, Some(Job::Running)) => {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.weak(format!("Looking on {}…", step.source()));
+            });
+        }
+        (Standing::Ready, Some(Job::Failed(e))) => {
+            ui.horizontal(|ui| {
+                ui.colored_label(ui.visuals().warn_fg_color, e);
+                retry(ui, actions);
+            });
+        }
+        (Standing::Ready, Some(Job::Found(Finding::Nothing(why)))) => {
+            ui.horizontal(|ui| {
+                ui.weak(why);
+                retry(ui, actions);
+            });
+        }
+        (Standing::Ready, Some(Job::Found(Finding::File { summary, text }))) => {
+            ui.label(summary);
+            ui.horizontal(|ui| {
+                if ui.button("Add").clicked() {
+                    actions.push(Action::Accept(step, text.clone()));
+                }
+                if ui
+                    .button("Not right")
+                    .on_hover_text("Skip it for this thing")
+                    .clicked()
+                {
+                    actions.push(Action::Skip(step, true));
+                }
+            });
+        }
+        (Standing::Ready, Some(Job::Found(Finding::Choose(matches)))) => {
+            ui.label("Which one is it?");
+            for m in matches {
+                ui.horizontal(|ui| {
+                    if ui.button("This one").clicked() {
+                        actions.push(Action::Accept(step, m.text()));
+                    }
+                    ui.label(&m.name);
+                    ui.hyperlink_to("store page", m.steam().store_url());
+                });
+            }
+            ui.horizontal(|ui| {
+                if ui.small_button("None of these").clicked() {
+                    actions.push(Action::Skip(step, true));
+                }
+                retry(ui, actions);
+            });
+        }
+    }
+}
+
 /// Small buttons at the right end of a radar row.
 fn triage_buttons(ui: &mut egui::Ui, w: &Watch, which: &[Triage], actions: &mut Vec<Action>) {
     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1161,6 +1555,7 @@ fn title_link(ui: &mut egui::Ui, w: &Watch, actions: &mut Vec<Action>) {
 impl eframe::App for ThingsApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let mut actions = Vec::new();
+        self.research.poll();
 
         let save_shortcut = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::S);
         if ui.input_mut(|i| i.consume_shortcut(&save_shortcut)) {
@@ -1186,7 +1581,7 @@ impl eframe::App for ThingsApp {
         egui::CentralPanel::default_margins().show(ui, |ui| self.entity_ui(ui, &mut actions));
 
         for action in actions {
-            self.apply(action);
+            self.apply(ui.ctx(), action);
         }
     }
 

@@ -2,6 +2,7 @@
 
 mod app;
 mod components;
+mod research;
 
 use std::path::PathBuf;
 

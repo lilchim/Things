@@ -12,6 +12,7 @@ pub mod collection;
 pub mod components;
 mod id;
 pub mod radar;
+pub mod research;
 pub mod search;
 mod store;
 pub mod tasks;

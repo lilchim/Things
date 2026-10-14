@@ -5,11 +5,13 @@
 //! files no kind claims still open in the raw text editor, so nothing on
 //! disk is ever hidden or lost.
 
+mod credits;
 mod markdown;
 mod ownership;
 mod raw;
 mod release;
 mod status;
+mod steam;
 mod tags;
 mod tasks;
 
@@ -46,7 +48,9 @@ pub fn registry() -> Vec<Box<dyn Kind>> {
     vec![
         Box::new(status::StatusKind),
         Box::new(ownership::OwnershipKind),
+        Box::new(steam::SteamKind),
         Box::new(release::ReleaseKind),
+        Box::new(credits::CreditsKind),
         Box::new(tasks::TasksKind),
         Box::new(tags::TagSetKind {
             file: "moods.ron",
@@ -55,6 +59,10 @@ pub fn registry() -> Vec<Box<dyn Kind>> {
         Box::new(tags::TagSetKind {
             file: "gameplay.ron",
             label: "Gameplay",
+        }),
+        Box::new(tags::TagSetKind {
+            file: "steam-tags.ron",
+            label: "Steam",
         }),
         Box::new(markdown::NotesKind),
         Box::new(markdown::JournalKind),

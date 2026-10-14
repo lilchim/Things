@@ -159,6 +159,21 @@ The Tasks collection starts new things with a task list. Task fields are
 searchable like any other: `repeat:daily`, `due:<2026-11`, or `tasks:` for
 everything that has some.
 
+## Research
+
+Things can look a game up for you. Each step needs something first (a
+title, a confirmed Steam app) and fills in one component, so confirming one
+finding unlocks the next: the title finds the Steam store page, and the
+Steam app finds the release date, developer and publisher, and store tags.
+Nothing is written until you add it.
+
+![Research hints on a game's page](docs/screenshots/research-hints.png)
+
+A thing's page shows faded **research hints** where those components would
+go (a per-collection setting), and the **Research** tab lists what's ready,
+what's waiting and what you skipped. See [docs/research.md](docs/research.md)
+for how it works and where the cache lives.
+
 ## Layout
 
 - `crates/things-core`: entity IDs, collections, the file store, and the
@@ -171,9 +186,12 @@ everything that has some.
 ```
 things/
   games/                     a collection
-    collection.ron           Collection(name: "Games", starts_with: [...], radar: true)
+    collection.ron           Collection(name: "Games", starts_with: [...], radar: true, hints: true)
     mass-effect-7f3a/        readable slug + short ID
       status.ron             Status(state: Playing)
+      steam.ron              Steam(appid: 1328670, name: "Mass Effect Legendary Edition")
+      credits.ron            Credits(developers: ["BioWare"], publishers: ["Electronic Arts"])
+      steam-tags.ron         Tags(tags: ["rpg", "story rich", "sci-fi"])
       ownership.ron          Interested or Owned, when added, seen via, link
       release.ron            Release(date: "2026-10-19", stage: Announced)
       moods.ron              Tags(tags: ["epic", "story-heavy"])
