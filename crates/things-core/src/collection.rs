@@ -33,6 +33,14 @@ pub struct Manifest {
     pub starts_with: Vec<String>,
     /// Whether things here show up on the radar.
     pub radar: bool,
+    /// Whether things' pages show research hints: faded placeholders for
+    /// what research could fill in. On unless the file says otherwise.
+    #[serde(default = "on")]
+    pub hints: bool,
+}
+
+fn on() -> bool {
+    true
 }
 
 impl Manifest {
@@ -42,6 +50,7 @@ impl Manifest {
             name: "Games".into(),
             starts_with: vec!["status.ron".into(), "moods.ron".into()],
             radar: true,
+            hints: true,
         }
     }
 
@@ -71,5 +80,19 @@ impl Collection {
         } else {
             name.to_owned()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::components::from_ron;
+
+    #[test]
+    fn hints_are_on_unless_turned_off() {
+        let old: Manifest = from_ron("Collection(name: \"Games\", radar: true)").unwrap();
+        assert!(old.hints);
+        let off: Manifest = from_ron("Collection(name: \"Tasks\", hints: false)").unwrap();
+        assert!(!off.hints);
     }
 }

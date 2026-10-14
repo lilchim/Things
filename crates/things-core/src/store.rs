@@ -121,6 +121,12 @@ impl Store {
         self.write_manifest(folder, manifest)
     }
 
+    /// Rewrites a collection's `collection.ron`.
+    pub fn set_manifest(&self, folder: &str, manifest: &Manifest) -> Result<(), StoreError> {
+        self.collection_dir(folder)?;
+        self.write_manifest(folder, manifest)
+    }
+
     fn write_manifest(&self, folder: &str, manifest: &Manifest) -> Result<(), StoreError> {
         let text = to_ron(manifest).expect("manifests always serialise");
         write_atomic(&self.root.join(folder).join(collection::MANIFEST), &text)

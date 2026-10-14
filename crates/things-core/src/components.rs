@@ -184,6 +184,31 @@ impl Tags {
     }
 }
 
+/// `steam.ron`: which Steam app a thing is. Confirming this is what lets
+/// research look up everything else Steam knows about it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Steam {
+    pub appid: u32,
+    /// The name on the store, which may differ from the thing's own title
+    /// ("Mass Effect Legendary Edition").
+    pub name: String,
+}
+
+impl Steam {
+    pub fn store_url(&self) -> String {
+        format!("https://store.steampowered.com/app/{}/", self.appid)
+    }
+}
+
+/// `credits.ron`: who made a thing and who put it out.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Credits {
+    pub developers: Vec<String>,
+    pub publishers: Vec<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
